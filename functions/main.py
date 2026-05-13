@@ -9,6 +9,7 @@ os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
 from datetime import datetime, timezone, timedelta
 import json
 import math
+import re
 
 from firebase_functions import https_fn, scheduler_fn, options
 from firebase_functions.options import set_global_options
@@ -22,14 +23,58 @@ app = initialize_app()
 db = firestore.client()
 
 
+def _normalize_name(name: str) -> str:
+    """Normalize a candidate name for fuzzy matching.
+    Lowercases, removes common suffixes, and removes all non-letter characters.
+    e.g. 'Bernard Sanders, Jr.' -> 'bernardsanders'
+    """
+    n = name.lower()
+    # Remove common suffixes (with or without dots)
+    n = re.sub(r'\b(jr|sr|ii|iii|iv|v|md|phd)\.?\b', '', n)
+    return re.sub(r'[^a-z]', '', n)
+
+
+def _find_candidate_by_name(name: str):
+    """Find an existing candidate whose normalized name matches.
+    Returns the Firestore document snapshot or None.
+    """
+    normalized = _normalize_name(name)
+    if not normalized:
+        return None
+
+    # First try indexed lookup on nameNormalized
+    matches = db.collection("candidates").where(
+        filter=FieldFilter("nameNormalized", "==", normalized)
+    ).limit(1).get()
+    if matches:
+        return matches[0]
+
+    # Fallback: scan all candidates (handles docs created before nameNormalized existed)
+    all_candidates = db.collection("candidates").limit(500).get()
+    for doc in all_candidates:
+        data = doc.to_dict()
+        if _normalize_name(data.get("name", "")) == normalized:
+            # Backfill the nameNormalized field for future queries
+            doc.reference.update({"nameNormalized": normalized})
+            return doc
+
+    return None
+
+
 def _verify_auth(req: https_fn.CallableRequest) -> str:
-    """Verify the request is authenticated and return the user's UID."""
+    """Verify the request is authenticated, update last IP, and return the user's UID."""
     if not req.auth:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.UNAUTHENTICATED,
             message="Authentication required.",
         )
-    return req.auth.uid
+    uid = req.auth.uid
+    # Track last IP for banning purposes
+    db.collection("users").document(uid).update({
+        "lastIp": req.raw_request.remote_addr,
+        "updatedAt": datetime.now(timezone.utc).isoformat()
+    })
+    return uid
 
 
 def _verify_admin(req: https_fn.CallableRequest) -> str:
@@ -52,12 +97,26 @@ def _get_user_points(uid: str) -> int:
     return 0
 
 
-def _check_ban(uid: str):
-    """Check if a user is banned and raise an error if so."""
-    doc = db.collection("users").document(uid).get()
-    if not doc.exists:
+def _check_ban(req: https_fn.CallableRequest):
+    """Check if a user or their IP is banned and raise an error if so."""
+    uid = req.auth.uid
+    user_doc = db.collection("users").document(uid).get()
+    
+    # Check IP ban
+    client_ip = req.raw_request.remote_addr
+    ip_bans = db.collection("bannedIps").document(client_ip).get()
+    if ip_bans.exists:
+        data = ip_bans.to_dict()
+        expiry = data.get("banExpiry")
+        if not expiry or datetime.fromisoformat(expiry) > datetime.now(timezone.utc):
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+                message="This IP address is banned.",
+            )
+
+    if not user_doc.exists:
         return
-    data = doc.to_dict()
+    data = user_doc.to_dict()
     if data.get("isBanned", False):
         expiry = data.get("banExpiry")
         if expiry:
@@ -78,14 +137,14 @@ def _check_ban(uid: str):
             )
 
 
-@https_fn.on_call(timeout_sec=300)
+@https_fn.on_call(timeout_sec=600)
 def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
     """Ingest a federal candidate's data from the FEC API by their FEC ID(s).
-    If a candidate with a matching name already exists, merge the new FEC data
-    into the existing profile (appending FEC IDs and accountability periods).
+    If a candidate with a matching normalized name already exists, merge the new
+    FEC data into the existing profile (appending FEC IDs and accountability periods).
     """
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     fec_ids_str = req.data.get("fecId", "").strip()
     fec_ids = [fid.strip() for fid in fec_ids_str.split(",") if fid.strip()]
@@ -129,14 +188,11 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
 
     candidate_name = base_candidate_data["name"]
 
-    # Check if a candidate with the same name already exists → merge
-    name_match = db.collection("candidates").where(
-        filter=FieldFilter("name", "==", candidate_name)
-    ).limit(1).get()
+    # Check if a candidate with a matching normalized name already exists → merge
+    existing_doc = _find_candidate_by_name(candidate_name)
 
-    if name_match:
+    if existing_doc:
         # Merge into existing candidate
-        existing_doc = name_match[0]
         existing_data = existing_doc.to_dict()
         existing_fec_ids = existing_data.get("fecIds", []) or []
         merged_fec_ids = list(set(existing_fec_ids + fec_ids))
@@ -153,15 +209,16 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
 
         return {
             "candidateId": existing_doc.id,
-            "name": candidate_name,
+            "name": existing_data.get("name", candidate_name),
             "merged": True,
-            "message": f"Merged {len(fec_ids)} new FEC ID(s) into existing profile for {candidate_name}.",
+            "message": f"Merged {len(fec_ids)} new FEC ID(s) into existing profile for {existing_data.get('name', candidate_name)}.",
         }
     else:
         # Create a new candidate
         candidate_data = base_candidate_data
         candidate_data["fecIds"] = fec_ids
         candidate_data["createdBy"] = uid
+        candidate_data["nameNormalized"] = _normalize_name(candidate_name)
         candidate_ref = db.collection("candidates").document()
         candidate_ref.set(candidate_data)
 
@@ -173,11 +230,13 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
         return {"candidateId": candidate_ref.id, "name": candidate_data["name"]}
 
 
-@https_fn.on_call(timeout_sec=300)
+@https_fn.on_call(timeout_sec=600)
 def create_candidate(req: https_fn.CallableRequest) -> dict:
-    """Create a new candidate page (state/local requires 1000 credibility points)."""
+    """Create a new candidate page, or merge into an existing one if the name matches.
+    State/local requires 1000 credibility points.
+    """
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     name = req.data.get("name", "").strip()
     level = req.data.get("level", "federal")
@@ -196,9 +255,19 @@ def create_candidate(req: https_fn.CallableRequest) -> dict:
                 message=f"You need 1000 credibility points to create a {level} candidate. You have {points}.",
             )
 
+    # Check if a candidate with the same normalized name already exists → return it
+    existing_doc = _find_candidate_by_name(name)
+    if existing_doc:
+        return {
+            "candidateId": existing_doc.id,
+            "merged": True,
+            "message": f"A candidate named '{existing_doc.to_dict().get('name', name)}' already exists. You can add accountability periods to their profile.",
+        }
+
     candidate_ref = db.collection("candidates").document()
     candidate_ref.set({
         "name": name,
+        "nameNormalized": _normalize_name(name),
         "badges": {},
         "createdBy": uid,
         "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -212,7 +281,7 @@ def create_candidate(req: https_fn.CallableRequest) -> dict:
 def add_accountability_period(req: https_fn.CallableRequest) -> dict:
     """Add a new accountability period to a candidate (costs 1000 credibility points)."""
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     candidate_id = req.data.get("candidateId", "")
     position = req.data.get("position", "")
@@ -251,6 +320,18 @@ def add_accountability_period(req: https_fn.CallableRequest) -> dict:
         "fecDataFetched": False,
     }
     period_ref.set(period_data)
+    
+    # Denormalize locations into candidate doc for faster searching
+    candidate_ref = db.collection("candidates").document(candidate_id)
+    candidate_doc = candidate_ref.get()
+    if candidate_doc.exists:
+        data = candidate_doc.to_dict()
+        locations = data.get("locations", [])
+        new_locs = set(locations)
+        if period_data.get("state"): new_locs.add(period_data["state"])
+        if period_data.get("region"): new_locs.add(period_data["region"])
+        
+        candidate_ref.update({"locations": list(new_locs)})
 
     return {"periodId": period_ref.id}
 
@@ -259,7 +340,7 @@ def add_accountability_period(req: https_fn.CallableRequest) -> dict:
 def submit_proposal(req: https_fn.CallableRequest) -> dict:
     """Submit a new value proposal for a field (costs 10 credibility points)."""
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     candidate_id = req.data.get("candidateId", "")
     period_id = req.data.get("periodId", "")
@@ -309,9 +390,13 @@ def submit_proposal(req: https_fn.CallableRequest) -> dict:
 
 @https_fn.on_call()
 def vote_proposal(req: https_fn.CallableRequest) -> dict:
-    """Upvote a proposal. Users can upvote 1 proposal per field."""
+    """Toggle vote on a proposal. If the user already voted on this proposal,
+    their vote is removed (un-upvote). If voted on a different proposal for the
+    same field, the old vote is moved. Otherwise a new vote is added.
+    Users can upvote at most 1 proposal per field.
+    """
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     proposal_id = req.data.get("proposalId", "")
     if not proposal_id:
@@ -335,29 +420,33 @@ def vote_proposal(req: https_fn.CallableRequest) -> dict:
             message="Cannot vote on a pinned proposal.",
         )
 
+    # Check if user already voted on THIS proposal → toggle off (un-upvote)
+    existing_vote = proposal_ref.collection("votes").document(uid).get()
+    if existing_vote.exists:
+        # Remove the vote
+        proposal_ref.collection("votes").document(uid).delete()
+        proposal_ref.update({"upvoteCount": firestore.Increment(-1)})
+        return {"action": "removed", "proposalId": proposal_id}
+
     field_id = proposal_data["fieldId"]
     candidate_id = proposal_data["candidateId"]
     period_id = proposal_data.get("periodId", "")
 
-    # Check if user already voted on another proposal for this field
-    existing_votes = db.collection("proposals")\
+    # Check if user voted on a DIFFERENT proposal for this field → switch
+    existing_proposals = db.collection("proposals")\
         .where(filter=FieldFilter("candidateId", "==", candidate_id))\
         .where(filter=FieldFilter("fieldId", "==", field_id))\
         .where(filter=FieldFilter("periodId", "==", period_id))\
         .get()
 
     old_proposal_id = None
-    for p in existing_votes:
+    for p in existing_proposals:
+        if p.id == proposal_id:
+            continue
         vote_doc = db.collection("proposals").document(p.id)\
             .collection("votes").document(uid).get()
         if vote_doc.exists:
-            if p.id == proposal_id:
-                raise https_fn.HttpsError(
-                    code=https_fn.FunctionsErrorCode.ALREADY_EXISTS,
-                    message="You already voted on this proposal.",
-                )
             old_proposal_id = p.id
-            # Remove old vote
             db.collection("proposals").document(p.id)\
                 .collection("votes").document(uid).delete()
             db.collection("proposals").document(p.id).update({
@@ -367,7 +456,7 @@ def vote_proposal(req: https_fn.CallableRequest) -> dict:
 
     # Add new vote
     vote_data = {
-        "oderId": uid,
+        "voterId": uid,
         "votedAt": datetime.now(timezone.utc).isoformat(),
         "voteCountAtTime": proposal_data.get("upvoteCount", 0),
     }
@@ -377,7 +466,7 @@ def vote_proposal(req: https_fn.CallableRequest) -> dict:
     proposal_ref.collection("votes").document(uid).set(vote_data)
     proposal_ref.update({"upvoteCount": firestore.Increment(1)})
 
-    return {"success": True}
+    return {"action": "added", "proposalId": proposal_id}
 
 
 @https_fn.on_call()
@@ -402,10 +491,13 @@ def admin_pin_proposal(req: https_fn.CallableRequest) -> dict:
     # Pin the proposal
     proposal_ref.update({"pinned": True, "pinnedAt": now})
 
-    # Award 200 points to the poster
+    # Award 200 points to the poster (minus already earned)
     author_uid = proposal_data["authorUid"]
+    poster_earned = proposal_data.get("accumulatedPoints", {}).get(author_uid, 0)
+    poster_bonus = max(0, 200 - poster_earned)
+    
     db.collection("users").document(author_uid).update({
-        "credibilityPoints": firestore.Increment(200)
+        "credibilityPoints": firestore.Increment(poster_bonus)
     })
 
     # Award 150 points to upvoters (minus already earned)
@@ -413,8 +505,10 @@ def admin_pin_proposal(req: https_fn.CallableRequest) -> dict:
     for vote in votes:
         voter_uid = vote.id
         if voter_uid != author_uid:
+            voter_earned = proposal_data.get("accumulatedPoints", {}).get(voter_uid, 0)
+            voter_bonus = max(0, 150 - voter_earned)
             db.collection("users").document(voter_uid).update({
-                "credibilityPoints": firestore.Increment(150)
+                "credibilityPoints": firestore.Increment(voter_bonus)
             })
 
     # Audit log
@@ -429,6 +523,39 @@ def admin_pin_proposal(req: https_fn.CallableRequest) -> dict:
         "targetUid": author_uid,
         "reason": reason,
         "timestamp": now,
+    })
+
+    return {"success": True}
+
+
+@https_fn.on_call()
+def admin_unpin_proposal(req: https_fn.CallableRequest) -> dict:
+    """Admin: Unpin a proposal."""
+    admin_uid = _verify_admin(req)
+
+    proposal_id = req.data.get("proposalId", "")
+    reason = req.data.get("reason", "No reason provided")
+
+    proposal_ref = db.collection("proposals").document(proposal_id)
+    proposal_doc = proposal_ref.get()
+    if not proposal_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Proposal not found.",
+        )
+
+    proposal_ref.update({"pinned": False, "pinnedAt": firestore.DELETE_FIELD})
+
+    admin_doc = db.collection("users").document(admin_uid).get()
+    admin_name = admin_doc.to_dict().get("displayName", "Admin") if admin_doc.exists else "Admin"
+
+    db.collection("auditLogs").add({
+        "adminUid": admin_uid,
+        "adminDisplayName": admin_name,
+        "action": "unpin_proposal",
+        "targetProposalId": proposal_id,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
     return {"success": True}
@@ -456,6 +583,16 @@ def admin_ban_user(req: https_fn.CallableRequest) -> dict:
         ban_data["banExpiry"] = (now + timedelta(days=duration_days)).isoformat()
 
     db.collection("users").document(target_uid).update(ban_data)
+
+    # Ban the user's last known IP
+    target_doc = db.collection("users").document(target_uid).get()
+    if target_doc.exists:
+        last_ip = target_doc.to_dict().get("lastIp")
+        if last_ip:
+            ip_ban_data = {"reason": reason, "adminUid": admin_uid}
+            if not permanent:
+                ip_ban_data["banExpiry"] = ban_data["banExpiry"]
+            db.collection("bannedIps").document(last_ip).set(ip_ban_data)
 
     admin_doc = db.collection("users").document(admin_uid).get()
     admin_name = admin_doc.to_dict().get("displayName", "Admin") if admin_doc.exists else "Admin"
@@ -507,6 +644,76 @@ def admin_award_points(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
+@https_fn.on_call()
+def request_proposal_deletion(req: https_fn.CallableRequest) -> dict:
+    """User: Request deletion of their own proposal."""
+    uid = _verify_auth(req)
+    _check_ban(req)
+
+    proposal_id = req.data.get("proposalId", "")
+    if not proposal_id:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="proposalId is required.",
+        )
+
+    proposal_ref = db.collection("proposals").document(proposal_id)
+    proposal_doc = proposal_ref.get()
+    if not proposal_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Proposal not found.",
+        )
+
+    proposal_data = proposal_doc.to_dict()
+    if proposal_data.get("authorUid") != uid:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+            message="Only the author can request deletion.",
+        )
+
+    proposal_ref.update({"deletionRequested": True})
+    return {"success": True}
+
+
+@https_fn.on_call()
+def admin_delete_proposal(req: https_fn.CallableRequest) -> dict:
+    """Admin: Grant a deletion request (actually delete the proposal)."""
+    admin_uid = _verify_admin(req)
+
+    proposal_id = req.data.get("proposalId", "")
+    reason = req.data.get("reason", "No reason provided")
+
+    proposal_ref = db.collection("proposals").document(proposal_id)
+    proposal_doc = proposal_ref.get()
+    if not proposal_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Proposal not found.",
+        )
+
+    proposal_data = proposal_doc.to_dict()
+    
+    # Audit log before deletion
+    admin_doc = db.collection("users").document(admin_uid).get()
+    admin_name = admin_doc.to_dict().get("displayName", "Admin") if admin_doc.exists else "Admin"
+
+    db.collection("auditLogs").add({
+        "adminUid": admin_uid,
+        "adminDisplayName": admin_name,
+        "action": "delete_proposal",
+        "targetProposalId": proposal_id,
+        "targetUid": proposal_data.get("authorUid"),
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Delete the proposal and its votes
+    proposal_ref.delete()
+    
+    return {"success": True}
+
+
 @scheduler_fn.on_schedule(schedule="every 24 hours")
 def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
     """Daily job: Award credibility points to users with top proposals."""
@@ -551,6 +758,10 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
         db.collection("users").document(poster_uid).update({
             "credibilityPoints": firestore.Increment(poster_x)
         })
+        # Track points earned per proposal to support "pinning bonus" calculation
+        db.collection("proposals").document(top["id"]).update({
+            f"accumulatedPoints.{poster_uid}": firestore.Increment(poster_x)
+        })
 
         # Award points to voters
         for vote in votes:
@@ -564,34 +775,73 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
                 db.collection("users").document(voter_uid).update({
                     "credibilityPoints": firestore.Increment(x)
                 })
+                # Track points earned per proposal
+                db.collection("proposals").document(top["id"]).update({
+                    f"accumulatedPoints.{voter_uid}": firestore.Increment(x)
+                })
 
 
 @https_fn.on_call()
 def search_candidates_fn(req: https_fn.CallableRequest) -> dict:
-    """Search candidates in the database by name."""
+    """Search candidates in the database by name or location (substring match)."""
     query = req.data.get("query", "").strip().lower()
     if not query or len(query) < 2:
         return {"candidates": []}
 
-    # Simple prefix search on name
+    # Fetch all candidates and filter by substring match in-memory
+    # (Firestore doesn't support native substring/contains queries)
     candidates = db.collection("candidates")\
         .order_by("name")\
-        .start_at({"name": query.title()})\
-        .end_at({"name": query.title() + "\uf8ff"})\
-        .limit(20)\
+        .limit(1000)\
         .get()
 
     results = []
     for c in candidates:
         data = c.to_dict()
-        results.append({
-            "id": c.id,
-            "name": data.get("name", ""),
-            "photoUrl": data.get("photoUrl", ""),
-            "status": data.get("status", "unknown"),
-        })
+        name = data.get("name", "").lower()
+        locations = [loc.lower() for loc in data.get("locations", [])]
+        
+        # Match name OR any location (state/region)
+        if query in name or any(query in loc for loc in locations):
+            results.append({
+                "id": c.id,
+                "name": data.get("name", ""),
+                "photoUrl": data.get("photoUrl", ""),
+                "status": data.get("status", "unknown"),
+                "locations": data.get("locations", []),
+            })
+            if len(results) >= 20:
+                break
 
     return {"candidates": results}
+
+
+@https_fn.on_call()
+def get_user_votes(req: https_fn.CallableRequest) -> dict:
+    """Get the proposal IDs the current user has voted on for a given candidate/field."""
+    uid = _verify_auth(req)
+
+    candidate_id = req.data.get("candidateId", "")
+    field_id = req.data.get("fieldId", "")
+    period_id = req.data.get("periodId", "")
+
+    if not candidate_id or not field_id:
+        return {"votedProposalIds": []}
+
+    proposals = db.collection("proposals")\
+        .where(filter=FieldFilter("candidateId", "==", candidate_id))\
+        .where(filter=FieldFilter("fieldId", "==", field_id))\
+        .where(filter=FieldFilter("periodId", "==", period_id))\
+        .get()
+
+    voted_ids = []
+    for p in proposals:
+        vote_doc = db.collection("proposals").document(p.id)\
+            .collection("votes").document(uid).get()
+        if vote_doc.exists:
+            voted_ids.append(p.id)
+
+    return {"votedProposalIds": voted_ids}
 
 
 @https_fn.on_call()
@@ -602,7 +852,7 @@ def submit_badge_proposal(req: https_fn.CallableRequest) -> dict:
     Costs 10 credibility points.
     """
     uid = _verify_auth(req)
-    _check_ban(uid)
+    _check_ban(req)
 
     candidate_id = req.data.get("candidateId", "")
     badge_id = req.data.get("badgeId", "")

@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "emulate": "firebase emulators:start --import=./.emulator_data --export-on-exit"
+    "emulate": "firebase emulators:start --import=./.emulator_data --export-on-exit",
+    "emulate:new": "firebase emulators:start"
   },
   "dependencies": {
     "firebase": "^12.13.0",

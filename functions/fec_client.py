@@ -42,7 +42,7 @@ class FECClient:
         params.setdefault("per_page", 100)
 
         url = f"{self.BASE_URL}{endpoint}"
-        response = requests.get(url, params=params, timeout=300)
+        response = requests.get(url, params=params, timeout=600)
         response.raise_for_status()
         return response.json()
 
@@ -245,7 +245,10 @@ class CandidateIngester:
                 # Get donation size breakdown
                 size_data = self.fec.get_schedule_a_by_size(fec_id, cycle)
                 if size_data:
-                    period["donationSizeBreakdown"] = self._process_size_breakdown(size_data, cycle)
+                    unitemized = t.get("individual_unitemized_contributions", 0) or 0
+                    period["donationSizeBreakdown"] = self._process_size_breakdown(
+                        size_data, cycle, unitemized
+                    )
 
                 # Get donation location breakdown
                 state_data = self.fec.get_schedule_a_by_state(fec_id, cycle)
@@ -253,6 +256,11 @@ class CandidateIngester:
                     period["donationLocationBreakdown"] = self._process_state_breakdown(
                         state_data, state, cycle
                     )
+
+                # Get top PAC donors
+                pac_data = self.fec.get_pac_contributions_to_candidate(fec_id, cycle)
+                if pac_data:
+                    period["topPacDonors"] = self._process_pac_donors(pac_data)
 
             except Exception as e:
                 print(f"Warning: Failed to fetch financial data for {fec_id} cycle {cycle}: {e}")
@@ -265,31 +273,68 @@ class CandidateIngester:
         }
 
     def _format_name(self, raw_name: str) -> str:
-        """Convert FEC-style 'LAST, FIRST' name to 'First Last'."""
-        if "," in raw_name:
-            parts = raw_name.split(",", 1)
-            last = parts[0].strip().title()
-            first = parts[1].strip().title() if len(parts) > 1 else ""
-            return f"{first} {last}".strip()
-        return raw_name.title()
+        """Convert FEC-style 'LAST, FIRST MIDDLE SUFFIX' name to 'First Middle Last Suffix'."""
+        if "," not in raw_name:
+            return raw_name.title()
+        
+        parts = [p.strip() for p in raw_name.split(",")]
+        last = parts[0].title()
+        
+        if len(parts) < 2:
+            return last
+            
+        # Second part is usually 'FIRST MIDDLE SUFFIX' or 'FIRST MIDDLE'
+        first_middle_suffix = parts[1].split()
+        if not first_middle_suffix:
+            return last
+            
+        # Very basic heuristic for suffixes
+        suffixes = {"Jr", "Sr", "Ii", "Iii", "Iv", "V", "Md", "Phd"}
+        
+        name_parts = []
+        suffix_parts = []
+        
+        for i, word in enumerate(first_middle_suffix):
+            word_title = word.title()
+            if word_title.rstrip(".") in suffixes:
+                suffix_parts.append(word_title)
+            else:
+                name_parts.append(word_title)
+        
+        # If there are more parts in the original raw_name (like a 3rd comma-separated part)
+        for extra in parts[2:]:
+            extra_title = extra.title()
+            if extra_title.rstrip(".") in suffixes:
+                suffix_parts.append(extra_title)
+            else:
+                name_parts.append(extra_title)
+                
+        full_name = " ".join(name_parts + [last] + suffix_parts)
+        return full_name.strip()
 
     def _map_status(self, fec_status: str) -> str:
         """Map FEC candidate status codes to our model."""
         status_map = {
             "C": "running",
-            "F": "out_of_office",
-            "N": "running",
-            "P": "out_of_office",
+            "F": "future",
+            "N": "not_yet_candidate",
+            "P": "prior",
         }
         return status_map.get(fec_status, "unknown")
 
     def _map_result(self, challenge: str) -> str:
-        """Map FEC incumbent challenge status to result."""
+        """Map FEC incumbent challenge status to a descriptive status string.
+        Note: FEC API does not reliably provide 'won/lost' results in history.
+        """
         if not challenge:
             return "unknown"
         challenge_lower = challenge.lower()
         if "incumbent" in challenge_lower:
-            return "won"
+            return "incumbent"
+        if "challenger" in challenge_lower:
+            return "challenger"
+        if "open" in challenge_lower:
+            return "open_seat"
         return "unknown"
 
     def _build_region(self, office: str, state: str, district: str) -> str:
@@ -298,14 +343,16 @@ class CandidateIngester:
             return "United States"
         if office == "senator":
             return state
-        if office == "representative" and district:
+        if office == "representative":
+            if not district or district == "00":
+                return f"{state} (At-Large)"
             return f"{state}-{district}"
         return state
 
-    def _process_size_breakdown(self, size_data: list, cycle: int) -> dict:
+    def _process_size_breakdown(self, size_data: list, cycle: int, unitemized_total: float = 0) -> dict:
         """Process FEC size breakdown data into our model."""
         breakdown = {
-            "under200": 0,
+            "under200": unitemized_total,
             "from200to499": 0,
             "from500to999": 0,
             "from1000to1999": 0,
@@ -318,15 +365,16 @@ class CandidateIngester:
             size = entry.get("size", 0)
             total = entry.get("total", 0) or 0
 
-            if size == 0 or size == 200:
+            # FEC Buckets: 0=under 200, 200=200-499, 500=500-999, 1000=1000-1999, 2000=2000+
+            if size == 0:
                 breakdown["under200"] += total
-            elif size == 500:
+            elif size == 200:
                 breakdown["from200to499"] += total
-            elif size == 1000:
+            elif size == 500:
                 breakdown["from500to999"] += total
-            elif size == 2000:
+            elif size == 1000:
                 breakdown["from1000to1999"] += total
-            elif size == 2000.01:
+            elif size == 2000 or size == 2000.01:
                 breakdown["from2000plus"] += total
 
         return breakdown
@@ -348,6 +396,23 @@ class CandidateIngester:
                 out_of_state += total
 
         return {"inState": in_state, "outOfState": out_of_state}
+
+    def _process_pac_donors(self, pac_data: list) -> list:
+        """Process FEC PAC contribution data into our topPacDonors model."""
+        donors = []
+        for entry in pac_data:
+            name = entry.get("committee_name") or entry.get("name")
+            if not name: continue
+            
+            donors.append({
+                "name": name,
+                "amount": entry.get("total", 0) or 0,
+                "type": entry.get("committee_type_full", "PAC")
+            })
+        
+        # Sort by amount desc and take top 10
+        donors.sort(key=lambda x: x["amount"], reverse=True)
+        return donors[:10]
 
     def _now_iso(self) -> str:
         """Get current time as ISO 8601 string."""

@@ -1,12 +1,11 @@
-'use client'
-
-import { useState } from 'react'
+import Link from 'next/link'
+import { POSITION_LABELS, type Position, type PacDonor } from '@/lib/types'
 
 interface PeriodOption {
   id: string
   label: string
   yearEnd: number
-  position: string
+  position: Position
   result?: string
   party?: string
   region?: string
@@ -20,6 +19,7 @@ interface PeriodOption {
   aipacMoney?: number
   donationSizeBreakdown?: { under200: number; from200to499: number; from500to999: number; from1000to1999: number; from2000plus: number }
   donationLocationBreakdown?: { inState: number; outOfState: number }
+  topPacDonors?: PacDonor[]
 }
 
 function formatCurrency(amount: number | undefined): string {
@@ -36,15 +36,22 @@ function DonationBar({ label, amount, total, color }: { label: string; amount: n
         <span style={{ fontWeight: 600 }}>{formatCurrency(amount)} ({pct.toFixed(1)}%)</span>
       </div>
       <div style={{ height: 6, background: 'var(--bg-secondary)', borderRadius: 3, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 3, transition: 'width 0.5s ease' }} />
+        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 3 }} />
       </div>
     </div>
   )
 }
 
-export default function AccountabilitySelector({ candidateId, periods }: { candidateId: string; periods: PeriodOption[] }) {
-  const [selectedIdx, setSelectedIdx] = useState(0)
-  const selected = periods[selectedIdx] || null
+export default function AccountabilitySelector({
+  candidateId,
+  periods,
+  selectedPeriodId,
+}: {
+  candidateId: string
+  periods: PeriodOption[]
+  selectedPeriodId: string
+}) {
+  const selected = periods.find((p) => p.id === selectedPeriodId) || periods[0] || null
 
   if (!selected) return null
 
@@ -58,20 +65,21 @@ export default function AccountabilitySelector({ candidateId, periods }: { candi
 
   return (
     <div>
-      {/* Period Selector */}
+      {/* Period Selector — Now uses Links for SSR */}
       <div style={{ marginBottom: '1.5rem' }}>
-        <label className="label" htmlFor="period-select">Accountability Period</label>
-        <select
-          id="period-select"
-          className="select"
-          value={selectedIdx}
-          onChange={(e) => setSelectedIdx(Number(e.target.value))}
-          style={{ maxWidth: 500 }}
-        >
-          {periods.map((p, i) => (
-            <option key={p.id} value={i}>{p.label}</option>
+        <label className="label">Accountability Period</label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+          {periods.map((p) => (
+            <Link
+              key={p.id}
+              href={`/candidate/${candidateId}/${p.id}`}
+              className={`btn btn-sm ${p.id === selectedPeriodId ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ textDecoration: 'none' }}
+            >
+              {p.yearEnd} • {POSITION_LABELS[p.position] || p.position}
+            </Link>
           ))}
-        </select>
+        </div>
       </div>
 
       {/* Financial Summary */}
@@ -107,14 +115,18 @@ export default function AccountabilitySelector({ candidateId, periods }: { candi
 
       {/* Additional Stats */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
-        <div className="card" style={{ padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Party</div>
-          <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{selected.party || 'Unknown'}</div>
-        </div>
-        <div className="card" style={{ padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Region</div>
-          <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{selected.region || 'Unknown'}</div>
-        </div>
+        {!['state_supreme_court_justice', 'appellate_court_judge', 'trial_court_judge'].includes(selected.position) && (
+          <div className="card" style={{ padding: '1rem' }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Party</div>
+            <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{selected.party || 'Unknown'}</div>
+          </div>
+        )}
+        {!['president', 'vice_president', 'cabinet'].includes(selected.position) && (
+          <div className="card" style={{ padding: '1rem' }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Region</div>
+            <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{selected.region || 'Unknown'}</div>
+          </div>
+        )}
         <div className="card" style={{ padding: '1rem' }}>
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Earmarked Money</div>
           <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{formatCurrency(selected.earmarkedMoney)}</div>
@@ -123,16 +135,18 @@ export default function AccountabilitySelector({ candidateId, periods }: { candi
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>AIPAC Money</div>
           <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{formatCurrency(selected.aipacMoney)}</div>
         </div>
-        <div className="card" style={{ padding: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stock Trading Volume</div>
-          <div style={{ fontWeight: 700, marginTop: '0.25rem', color: selected.stockTradingVolume === 0 ? 'var(--success)' : 'var(--text-primary)' }}>
-            {formatCurrency(selected.stockTradingVolume)}
+        {['president', 'vice_president', 'cabinet', 'senator', 'representative'].includes(selected.position) && (
+          <div className="card" style={{ padding: '1rem' }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stock Trading Volume</div>
+            <div style={{ fontWeight: 700, marginTop: '0.25rem', color: selected.stockTradingVolume === 0 ? 'var(--success)' : 'var(--text-primary)' }}>
+              {formatCurrency(selected.stockTradingVolume)}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Donation Breakdown Charts */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
         {/* Size Breakdown */}
         {selected.donationSizeBreakdown && sizeTotal > 0 && (
           <div className="card">
@@ -154,6 +168,33 @@ export default function AccountabilitySelector({ candidateId, periods }: { candi
           </div>
         )}
       </div>
+
+      {/* Top PAC Donors */}
+      {selected.topPacDonors && selected.topPacDonors.length > 0 && (
+        <div className="card">
+          <h4 style={{ marginBottom: '1rem', fontSize: '0.9375rem' }}>Top PAC Donors</h4>
+          <div className="data-table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>PAC Name</th>
+                  <th>Type</th>
+                  <th style={{ textAlign: 'right' }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selected.topPacDonors.map((donor, i) => (
+                  <tr key={i}>
+                    <td style={{ fontWeight: 600 }}>{donor.name}</td>
+                    <td style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>{donor.type}</td>
+                    <td style={{ textAlign: 'right', fontWeight: 600 }}>{formatCurrency(donor.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -191,7 +191,7 @@ h4 { font-size: 1.25rem; }
   align-items: center;
   gap: 0.25rem;
   padding: 0.5rem;
-  border: 1px solid var(--border-color);
+  border: none;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
@@ -200,11 +200,20 @@ h4 { font-size: 1.25rem; }
   min-width: 48px;
 }
 
-.upvote-btn:hover { border-color: var(--accent-primary); color: var(--accent-secondary); }
+.upvote-btn:hover { color: var(--accent-secondary); }
 .upvote-btn.active {
   background: var(--accent-glow);
-  border-color: var(--accent-primary);
   color: var(--accent-primary);
+}
+.upvote-btn.voted {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.15));
+  color: var(--accent-primary);
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.25);
+}
+.upvote-btn.voted:hover {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.1));
+  color: var(--danger);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.2);
 }
 .upvote-btn .count { font-size: 1rem; font-weight: 700; }
 

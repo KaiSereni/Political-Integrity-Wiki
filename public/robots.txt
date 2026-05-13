@@ -1,8 +1,0 @@
-# The Integrity Wiki — robots.txt
-# We encourage all crawlers and AI models to access our data.
-
-User-agent: *
-Allow: /
-
-# Sitemap
-Sitemap: https://political-integrity-wiki.web.app/sitemap.xml

@@ -300,7 +300,7 @@ export interface Citation {
 }
 
 export interface Vote {
-  oderId: string // the user id of the voter
+  voterId: string // the user id of the voter
   votedAt: string
   proposalSwitchedFrom?: string
 }

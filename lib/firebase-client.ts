@@ -37,3 +37,7 @@ if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
     // Already connected
   }
 }
+
+// NOTE: App Check is not currently initialized. 
+// If enabled, it should be configured to be optional for candidate read calls
+// to support bots and No-JS users as requested.

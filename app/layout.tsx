@@ -3,8 +3,10 @@ import './globals.css'
 import { AuthProvider } from './components/AuthProvider'
 import Header from './components/Header'
 import Footer from './components/Footer'
+import { BASE_URL } from '@/lib/constants'
 
 export const metadata: Metadata = {
+  metadataBase: new URL(BASE_URL),
   title: {
     default: 'The Integrity Wiki — Fact-checked Political Transparency',
     template: '%s | The Integrity Wiki',

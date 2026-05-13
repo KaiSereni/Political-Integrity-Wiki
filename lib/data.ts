@@ -1,6 +1,6 @@
 import 'server-only'
 import { adminDb } from './firebase-admin'
-import type { Candidate, AccountabilityPeriod, Proposal, User, AuditLog } from './types'
+import type { Candidate, AccountabilityPeriod, Proposal, User, AuditLog, Election } from './types'
 
 /**
  * Server-side data fetching functions.
@@ -25,6 +25,21 @@ export async function getAccountabilityPeriods(candidateId: string): Promise<Acc
     id: doc.id,
     ...doc.data(),
   })) as AccountabilityPeriod[]
+}
+
+export async function getAccountabilityPeriod(
+  candidateId: string,
+  periodId: string
+): Promise<AccountabilityPeriod | null> {
+  const doc = await adminDb
+    .collection('candidates')
+    .doc(candidateId)
+    .collection('accountabilityPeriods')
+    .doc(periodId)
+    .get()
+
+  if (!doc.exists) return null
+  return { id: doc.id, ...doc.data() } as AccountabilityPeriod
 }
 
 export async function getProposals(
@@ -92,22 +107,32 @@ export async function getTopEditors(limit: number = 10): Promise<User[]> {
   })) as User[]
 }
 
-export async function searchCandidates(query: string): Promise<Candidate[]> {
+export async function searchCandidates(query: string): Promise<(Candidate & { latestPeriodId?: string })[]> {
   if (!query || query.length < 2) return []
 
-  const titleCase = query.charAt(0).toUpperCase() + query.slice(1).toLowerCase()
+  const lowerQuery = query.toLowerCase()
+
+  // Firestore doesn't support substring queries, so we fetch all and filter in-memory
   const snapshot = await adminDb
     .collection('candidates')
     .orderBy('name')
-    .startAt(titleCase)
-    .endAt(titleCase + '\uf8ff')
-    .limit(20)
+    .limit(500)
     .get()
 
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  })) as Candidate[]
+  return Promise.all(snapshot.docs
+    .filter((doc) => {
+      const name = (doc.data().name || '').toLowerCase()
+      return name.includes(lowerQuery)
+    })
+    .slice(0, 20)
+    .map(async (doc) => {
+      const periods = await getAccountabilityPeriods(doc.id)
+      return {
+        id: doc.id,
+        ...doc.data(),
+        latestPeriodId: periods[0]?.id,
+      } as Candidate & { latestPeriodId?: string }
+    }))
 }
 
 export async function getRecentAuditLogs(limit: number = 50): Promise<AuditLog[]> {
@@ -123,17 +148,21 @@ export async function getRecentAuditLogs(limit: number = 50): Promise<AuditLog[]
   })) as AuditLog[]
 }
 
-export async function getAllCandidates(limit: number = 100): Promise<Candidate[]> {
+export async function getAllCandidates(limit: number = 100): Promise<(Candidate & { latestPeriodId?: string })[]> {
   const snapshot = await adminDb
     .collection('candidates')
     .orderBy('name')
     .limit(limit)
     .get()
 
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  })) as Candidate[]
+  return Promise.all(snapshot.docs.map(async (doc) => {
+    const periods = await getAccountabilityPeriods(doc.id)
+    return {
+      id: doc.id,
+      ...doc.data(),
+      latestPeriodId: periods[0]?.id,
+    }
+  })) as Promise<(Candidate & { latestPeriodId?: string })[]>
 }
 
 export async function getUserProfile(uid: string): Promise<User | null> {
@@ -187,4 +216,17 @@ export async function getTopBadgeStatus(
   }
 
   return combinedPoints >= 500 ? top.value : 'unknown'
+}
+export async function getUpcomingElections(limit: number = 5): Promise<Election[]> {
+  const snapshot = await adminDb
+    .collection('elections')
+    .where('date', '>=', new Date().toISOString())
+    .orderBy('date', 'asc')
+    .limit(limit)
+    .get()
+
+  return snapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  })) as Election[]
 }

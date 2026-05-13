@@ -55,11 +55,11 @@ service cloud.firestore {
       allow delete: if isAdmin();
 
       // Votes — public read, authenticated write (own votes only)
-      match /votes/{oderId} {
+      match /votes/{voterId} {
         allow read: if true;
-        allow create: if isAuthenticated() && isNotBanned() && isOwner(oderId);
-        allow update: if isOwner(oderId);
-        allow delete: if isOwner(oderId) || isAdmin();
+        allow create: if isAuthenticated() && isNotBanned() && isOwner(voterId);
+        allow update: if isOwner(voterId);
+        allow delete: if isOwner(voterId) || isAdmin();
       }
     }
 

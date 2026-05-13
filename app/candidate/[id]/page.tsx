@@ -1,27 +1,6 @@
-import { notFound } from 'next/navigation'
+import { notFound, redirect } from 'next/navigation'
 import Link from 'next/link'
-import { getCandidate, getAccountabilityPeriods, getTopProposalValue, getBadgeProposals, getTopBadgeStatus } from '@/lib/data'
-import { BADGE_DEFINITIONS, EDITABLE_FIELDS, POSITION_LABELS, type BadgeStatus } from '@/lib/types'
-import type { Metadata } from 'next'
-import AccountabilitySelector from './AccountabilitySelector'
-import BadgeVoting from './BadgeVoting'
-
-export async function generateMetadata(
-  props: { params: Promise<{ id: string }> }
-): Promise<Metadata> {
-  const { id } = await props.params
-  const candidate = await getCandidate(id)
-  if (!candidate) return { title: 'Candidate Not Found' }
-  return {
-    title: candidate.name,
-    description: `Campaign finance integrity profile for ${candidate.name}. Track PAC money, stock trades, and corruption pledges.`,
-  }
-}
-
-function formatCurrency(amount: number | undefined): string {
-  if (amount === undefined || amount === null) return 'Unknown'
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount)
-}
+import { getCandidate, getAccountabilityPeriods } from '@/lib/data'
 
 export default async function CandidatePage(props: { params: Promise<{ id: string }> }) {
   const { id } = await props.params
@@ -29,182 +8,25 @@ export default async function CandidatePage(props: { params: Promise<{ id: strin
   if (!candidate) notFound()
 
   const periods = await getAccountabilityPeriods(id)
-  const latestPeriod = periods[0] || null
+  if (periods.length > 0) {
+    redirect(`/candidate/${id}/${periods[0].id}`)
+  }
 
-  // Fetch badge proposals and determine effective badge statuses
-  const badgeData = await Promise.all(
-    BADGE_DEFINITIONS.map(async (badge) => {
-      const proposals = await getBadgeProposals(id, badge.id)
-      const topStatus = await getTopBadgeStatus(id, badge.id)
-      return { badge, proposals, topStatus: topStatus as BadgeStatus }
-    })
-  )
-
-  // Check if any badge is "unkept" — if so, all other badges become greyed
-  const hasUnkeptBadge = badgeData.some((bd) => bd.topStatus === 'unkept')
-
+  // If no periods exist, we could still show the candidate info or a 404.
+  // The user wants the URL to be /candidate/{id}/{periodId}, so if there's no period, 
+  // maybe we should just show a "No data yet" page or redirect to a default.
+  // For now, let's just show the basic info without a period if possible, 
+  // but the requirement says "each race ... is at url: /candidate/{id}/{periodId}".
+  
   return (
     <div className="container animate-fade-in">
-      {/* Candidate Header */}
-      <article>
-        <div className="candidate-header">
-          <div
-            className="candidate-photo"
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '3rem', fontWeight: 900,
-              background: 'linear-gradient(135deg, var(--accent-primary), #7c3aed)',
-              color: 'white',
-            }}
-          >
-            {candidate.name.charAt(0)}
-          </div>
-          <div className="candidate-info">
-            <h1 className="candidate-name">{candidate.name}</h1>
-            <div className="candidate-meta">
-              {candidate.status && (
-                <span className="meta-tag" style={{
-                  color: candidate.status === 'running' ? 'var(--success)' :
-                    candidate.status === 'in_office' ? 'var(--accent-secondary)' : 'var(--text-muted)',
-                }}>
-                  {candidate.status.replace('_', ' ').toUpperCase()}
-                </span>
-              )}
-              {candidate.fecIds && candidate.fecIds.length > 0 && (
-                <span className="meta-tag">FEC: {candidate.fecIds.join(', ')}</span>
-              )}
-              {candidate.nextElectionDate && (
-                <span className="meta-tag">Next Election: {candidate.nextElectionDate}</span>
-              )}
-            </div>
-
-            {/* Contact Info */}
-            {candidate.contactInfo && (
-              <details style={{ marginTop: '0.75rem' }}>
-                <summary style={{ cursor: 'pointer', color: 'var(--accent-secondary)', fontSize: '0.875rem' }}>
-                  Contact Information
-                </summary>
-                <div style={{ marginTop: '0.5rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-                  {candidate.contactInfo.phone && <div>📞 {candidate.contactInfo.phone}</div>}
-                  {candidate.contactInfo.email && <div>✉️ {candidate.contactInfo.email}</div>}
-                  {candidate.contactInfo.website && (
-                    <div>🌐 <a href={candidate.contactInfo.website} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-secondary)' }}>{candidate.contactInfo.website}</a></div>
-                  )}
-                  {candidate.contactInfo.office && <div>🏛️ {candidate.contactInfo.office}</div>}
-                </div>
-              </details>
-            )}
-          </div>
+      <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
+        <h1 className="candidate-name">{candidate.name}</h1>
+        <p className="text-secondary">No accountability periods have been added for this candidate yet.</p>
+        <div style={{ marginTop: '2rem' }}>
+          <Link href="/create" className="btn btn-primary">Add Accountability Period</Link>
         </div>
-
-        {/* Badges — Interactive Voting */}
-        <section style={{ marginBottom: '2rem' }}>
-          <h3 className="section-title">Integrity Badges</h3>
-          <p className="text-secondary" style={{ fontSize: '0.8125rem', marginBottom: '0.75rem' }}>
-            Click a badge to view proposals and vote on its status. Cited sources (e.g., video clips) are required.
-          </p>
-          {hasUnkeptBadge && (
-            <p style={{ fontSize: '0.8125rem', color: 'var(--danger)', marginBottom: '0.75rem' }}>
-              ⚠ This candidate has broken a pledge. All other badges are now unreliable.
-            </p>
-          )}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem 0.5rem' }}>
-            {badgeData.map(({ badge, proposals, topStatus }) => {
-              // Apply unkept cascade: if any badge is unkept, all non-unkept become unknown
-              const effectiveStatus: BadgeStatus = hasUnkeptBadge && topStatus !== 'unkept'
-                ? 'unknown'
-                : topStatus
-              return (
-                <BadgeVoting
-                  key={badge.id}
-                  candidateId={id}
-                  badgeId={badge.id}
-                  badgeName={badge.name}
-                  badgeDescription={badge.description}
-                  currentStatus={effectiveStatus}
-                  initialProposals={proposals}
-                />
-              )
-            })}
-          </div>
-        </section>
-
-        {/* Industries */}
-        {candidate.industries && candidate.industries.length > 0 && (
-          <section style={{ marginBottom: '2rem' }}>
-            <h3 className="section-title">Private Sector Employment & Potential Conflicts</h3>
-            {candidate.industries.map((ind, i) => (
-              <div key={i} className="card" style={{ marginBottom: '0.5rem' }}>
-                <div style={{ fontWeight: 600 }}>{ind.industry} {ind.years && `(${ind.years})`}</div>
-                {ind.actions && ind.actions.length > 0 && (
-                  <ul style={{ marginTop: '0.5rem', paddingLeft: '1.25rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                    {ind.actions.map((action, j) => <li key={j}>{action}</li>)}
-                  </ul>
-                )}
-              </div>
-            ))}
-          </section>
-        )}
-
-        {/* Accountability Period Section */}
-        <section>
-          <h2 className="section-title">Campaign Finance & Accountability</h2>
-          <AccountabilitySelector
-            candidateId={id}
-            periods={periods.map((p) => ({
-              id: p.id,
-              label: `${p.yearStart}–${p.yearEnd} • ${POSITION_LABELS[p.position] || p.position} ${p.result ? `(${p.result})` : ''}`,
-              yearEnd: p.yearEnd,
-              position: p.position,
-              result: p.result,
-              party: p.party,
-              region: p.region,
-              totalRaised: p.totalRaised,
-              totalPacMoney: p.totalPacMoney,
-              corporatePacMoney: p.corporatePacMoney,
-              peakNetAssets: p.peakNetAssets,
-              peakStockValue: p.peakStockValue,
-              stockTradingVolume: p.stockTradingVolume,
-              earmarkedMoney: p.earmarkedMoney,
-              aipacMoney: p.aipacMoney,
-              donationSizeBreakdown: p.donationSizeBreakdown,
-              donationLocationBreakdown: p.donationLocationBreakdown,
-            }))}
-          />
-
-          {periods.length === 0 && (
-            <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
-              <p className="text-secondary">No accountability periods yet.</p>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-                Contributors can add election cycles for this candidate.
-              </p>
-            </div>
-          )}
-        </section>
-
-        {/* Link to field proposals */}
-        <section style={{ marginTop: '2rem' }}>
-          <h3 className="section-title">Contribute Data</h3>
-          <p className="text-secondary" style={{ marginBottom: '1rem', fontSize: '0.9375rem' }}>
-            Help verify information about this candidate by proposing values and voting on proposals.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '0.5rem' }}>
-            {EDITABLE_FIELDS.filter((f) => !f.id.startsWith('badge_')).slice(0, 12).map((field) => (
-              <Link
-                key={field.id}
-                href={`/candidate/${id}/proposals/${field.id}${latestPeriod && field.periodSpecific ? `?period=${latestPeriod.id}` : ''}`}
-                className="card"
-                style={{ textDecoration: 'none', color: 'inherit', padding: '1rem' }}
-              >
-                <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{field.name}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                  {field.description.substring(0, 80)}...
-                </div>
-              </Link>
-            ))}
-          </div>
-        </section>
-      </article>
+      </div>
     </div>
   )
 }

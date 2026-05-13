@@ -1,10 +1,13 @@
 import Link from 'next/link'
 import SearchBar from './components/SearchBar'
-import { getTopEditors, getAllCandidates } from '@/lib/data'
+import { getTopEditors, getAllCandidates, getUpcomingElections } from '@/lib/data'
+import { POSITION_LABELS } from '@/lib/types'
 
 export default async function HomePage() {
+  // ... (keeping the existing fetch logic)
   let topEditors: Awaited<ReturnType<typeof getTopEditors>> = []
   let recentCandidates: Awaited<ReturnType<typeof getAllCandidates>> = []
+  let upcomingElections: Awaited<ReturnType<typeof getUpcomingElections>> = []
 
   try {
     topEditors = await getTopEditors(10)
@@ -12,6 +15,10 @@ export default async function HomePage() {
 
   try {
     recentCandidates = await getAllCandidates(12)
+  } catch { /* DB may not be initialized yet */ }
+
+  try {
+    upcomingElections = await getUpcomingElections(10)
   } catch { /* DB may not be initialized yet */ }
 
   return (
@@ -37,6 +44,44 @@ export default async function HomePage() {
       </section>
 
       <div className="container">
+        {/* Upcoming Races */}
+        <section style={{ marginBottom: '3rem' }}>
+          <h2 className="section-title">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-secondary)" strokeWidth="2">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+              <line x1="16" y1="2" x2="16" y2="6" />
+              <line x1="8" y1="2" x2="8" y2="6" />
+              <line x1="3" y1="10" x2="21" y2="10" />
+            </svg>
+            Upcoming Races
+          </h2>
+          {upcomingElections.length === 0 ? (
+            <div className="card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+              No upcoming races found. Use the search bar to find candidates for future elections.
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '1rem' }}>
+              {upcomingElections.map((election) => (
+                <div key={election.id} className="card election-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <div>
+                      <div style={{ fontSize: '0.75rem', fontWeight: 600, textTransform: 'uppercase', color: 'var(--accent-secondary)' }}>
+                        {election.date} • {election.type}
+                      </div>
+                      <h3 style={{ fontSize: '1.125rem', margin: '0.25rem 0' }}>
+                        {POSITION_LABELS[election.position] || election.position}
+                      </h3>
+                      <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                        {election.level === 'federal' ? 'Federal' : `${election.state} ${election.district || ''}`}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {/* Stats */}
         <div className="stats-grid">
           <div className="card stat-card">
@@ -80,7 +125,7 @@ export default async function HomePage() {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.75rem' }}>
                 {recentCandidates.map((c) => (
-                  <Link key={c.id} href={`/candidate/${c.id}`} className="card" style={{ textDecoration: 'none', color: 'inherit' }}>
+                  <Link key={c.id} href={`/candidate/${c.id}/${c.latestPeriodId || ''}`} className="card" style={{ textDecoration: 'none', color: 'inherit' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                       <div style={{
                         width: 48, height: 48, borderRadius: 'var(--radius-md)',

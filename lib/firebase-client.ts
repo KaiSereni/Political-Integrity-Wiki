@@ -4,6 +4,7 @@ import { initializeApp, getApps } from 'firebase/app'
 import { getAuth, connectAuthEmulator, type Auth } from 'firebase/auth'
 import { getFirestore, connectFirestoreEmulator, type Firestore } from 'firebase/firestore'
 import { getFunctions, connectFunctionsEmulator, type Functions } from 'firebase/functions'
+import { getStorage, connectStorageEmulator, type FirebaseStorage } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey: 'AIzaSyD-TwhgZ1mXiIjEullP02qeMUlfmO5BDwY',
@@ -26,6 +27,7 @@ const app = getClientApp()
 export const auth: Auth = getAuth(app)
 export const db: Firestore = getFirestore(app)
 export const functions: Functions = getFunctions(app)
+export const storage: FirebaseStorage = getStorage(app)
 
 // Connect to emulators in development
 if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
@@ -33,6 +35,7 @@ if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
     connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true })
     connectFirestoreEmulator(db, '127.0.0.1', 8080)
     connectFunctionsEmulator(functions, '127.0.0.1', 5001)
+    connectStorageEmulator(storage, '127.0.0.1', 9199)
   } catch {
     // Already connected
   }

@@ -1,9 +1,12 @@
 'use client'
 
+import { useState } from 'react'
 import { useAuth } from './AuthProvider'
+import ProfileModal from './ProfileModal'
 
 export default function AuthButton() {
   const { user, loading, signIn, logOut } = useAuth()
+  const [isProfileOpen, setIsProfileOpen] = useState(false)
 
   if (loading) {
     return <div className="skeleton" style={{ width: 100, height: 36, borderRadius: 'var(--radius-xl)' }} />
@@ -11,31 +14,51 @@ export default function AuthButton() {
 
   if (user) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          {user.photoURL && (
+      <>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <button 
+            onClick={() => setIsProfileOpen(true)}
+            style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '0.5rem',
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              cursor: 'pointer',
+              color: 'inherit',
+              textAlign: 'left'
+            }}
+          >
             <img
-              src={user.photoURL}
+              src={user.photoURL || 'https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y'}
               alt={user.displayName}
               style={{
                 width: 32,
                 height: 32,
                 borderRadius: '50%',
                 border: '2px solid var(--border-color)',
+                objectFit: 'cover'
               }}
             />
-          )}
-          <div style={{ lineHeight: 1.2 }}>
-            <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>{user.displayName}</div>
-            <div style={{ fontSize: '0.6875rem', color: 'var(--accent-secondary)' }}>
-              {user.credibilityPoints} pts
+            <div style={{ lineHeight: 1.2 }}>
+              <div style={{ fontSize: '0.8125rem', fontWeight: 600 }}>{user.displayName}</div>
+              <div style={{ fontSize: '0.6875rem', color: 'var(--accent-secondary)' }}>
+                {user.credibilityPoints} pts
+              </div>
             </div>
-          </div>
+          </button>
+          <button className="btn btn-secondary btn-sm" onClick={logOut}>
+            Sign Out
+          </button>
         </div>
-        <button className="btn btn-secondary btn-sm" onClick={logOut}>
-          Sign Out
-        </button>
-      </div>
+
+        <ProfileModal 
+          isOpen={isProfileOpen || !!user.isNewUser} 
+          onClose={() => setIsProfileOpen(false)}
+          isInitialSetup={!!user.isNewUser}
+        />
+      </>
     )
   }
 

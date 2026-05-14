@@ -8,7 +8,7 @@ import {
   GoogleAuthProvider,
   type User as FirebaseUser,
 } from 'firebase/auth'
-import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore'
 import { auth, db } from '@/lib/firebase-client'
 
 interface AuthUser {
@@ -18,6 +18,7 @@ interface AuthUser {
   email: string
   credibilityPoints: number
   isAdmin: boolean
+  isNewUser?: boolean
 }
 
 interface AuthContextType {
@@ -39,24 +40,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
-      if (firebaseUser) {
-        // Get or create user profile in Firestore
-        const userRef = doc(db, 'users', firebaseUser.uid)
-        const userDoc = await getDoc(userRef)
+    let unsubscribeSnapshot: (() => void) | null = null
 
-        if (userDoc.exists()) {
-          const data = userDoc.data()
-          setUser({
-            uid: firebaseUser.uid,
-            displayName: data.displayName || firebaseUser.displayName || 'Anonymous',
-            photoURL: data.photoURL || firebaseUser.photoURL || '',
-            email: data.email || firebaseUser.email || '',
-            credibilityPoints: data.credibilityPoints || 0,
-            isAdmin: data.isAdmin || false,
-          })
-        } else {
-          // Create new user profile with 100 starting credibility points
+    const unsubscribeAuth = onAuthStateChanged(auth, async (firebaseUser: FirebaseUser | null) => {
+      if (unsubscribeSnapshot) {
+        unsubscribeSnapshot()
+        unsubscribeSnapshot = null
+      }
+
+      if (firebaseUser) {
+        const userRef = doc(db, 'users', firebaseUser.uid)
+        
+        // Check if it's a first-time login
+        const userDoc = await getDoc(userRef)
+        const isNew = !userDoc.exists()
+
+        if (isNew) {
           const newUser = {
             displayName: firebaseUser.displayName || 'Anonymous',
             photoURL: firebaseUser.photoURL || '',
@@ -67,18 +66,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             createdAt: new Date().toISOString(),
           }
           await setDoc(userRef, newUser)
-          setUser({
-            uid: firebaseUser.uid,
-            ...newUser,
-          })
         }
+
+        // Setup real-time listener
+        unsubscribeSnapshot = onSnapshot(userRef, (doc) => {
+          if (doc.exists()) {
+            const data = doc.data()
+            setUser({
+              uid: firebaseUser.uid,
+              displayName: data.displayName || 'Anonymous',
+              photoURL: data.photoURL || '',
+              email: data.email || '',
+              credibilityPoints: data.credibilityPoints || 0,
+              isAdmin: data.isAdmin || false,
+              isNewUser: isNew && !data.hasCompletedSetup, // We can use a flag
+            })
+          }
+          setLoading(false)
+        })
       } else {
         setUser(null)
+        setLoading(false)
       }
-      setLoading(false)
     })
 
-    return unsubscribe
+    return () => {
+      unsubscribeAuth()
+      if (unsubscribeSnapshot) unsubscribeSnapshot()
+    }
   }, [])
 
   const signIn = async () => {

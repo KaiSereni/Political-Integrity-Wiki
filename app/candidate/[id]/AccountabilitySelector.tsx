@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { POSITION_LABELS, type Position, type PacDonor } from '@/lib/types'
+import AddPeriodAction from './AddPeriodAction'
 
 interface PeriodOption {
   id: string
@@ -67,7 +68,10 @@ export default function AccountabilitySelector({
     <div>
       {/* Period Selector — Now uses Links for SSR */}
       <div style={{ marginBottom: '1.5rem' }}>
-        <label className="label">Accountability Period</label>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '0.5rem' }}>
+          <label className="label" style={{ marginBottom: 0 }}>Accountability Period</label>
+          <AddPeriodAction candidateId={candidateId} />
+        </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
           {periods.map((p) => (
             <Link

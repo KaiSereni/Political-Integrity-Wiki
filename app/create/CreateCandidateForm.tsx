@@ -3,13 +3,14 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/app/components/AuthProvider'
-import { createCandidateAction } from '@/lib/actions'
+import { functions } from '@/lib/firebase-client'
+import { httpsCallable } from 'firebase/functions'
 import IngestingModal from '@/app/components/IngestingModal'
 
 export default function CreateCandidateForm() {
   const { user } = useAuth()
   const router = useRouter()
-  const [mode, setMode] = useState<'fec' | 'manual'>('fec')
+  const [mode, setMode] = useState<'fec' | 'name'>('fec')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -21,6 +22,32 @@ export default function CreateCandidateForm() {
     )
   }
 
+  const handleSubmit = async (e: React.SubmitEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+
+    const formData = new FormData(e.currentTarget)
+    
+    try {
+      if (mode === 'fec') {
+        const fecId = formData.get('fecId') as string
+        const ingestFn = httpsCallable<{ fecId: string }, { candidateId: string }>(functions, 'ingest_fec_candidate', {timeout: 600000})
+        const result = await ingestFn({ fecId })
+        router.push(`/candidate/${result.data.candidateId}`)
+      } else {
+        const name = formData.get('name') as string
+        const createFn = httpsCallable<{ name: string }, { candidateId: string }>(functions, 'create_candidate', {timeout: 600000})
+        const result = await createFn({ name })
+        router.push(`/candidate/${result.data.candidateId}`)
+      }
+    } catch (err: any) {
+      console.error('Submission failed:', err)
+      setError(err.message || 'An unexpected error occurred.')
+      setLoading(false)
+    }
+  }
+
   return (
     <div>
       {/* Mode selector */}
@@ -30,32 +57,18 @@ export default function CreateCandidateForm() {
           className={`btn ${mode === 'fec' ? 'btn-primary' : 'btn-secondary'}`} 
           onClick={() => setMode('fec')}
         >
-          Import from FEC
+          By FEC ID
         </button>
         <button 
           type="button" 
-          className={`btn ${mode === 'manual' ? 'btn-primary' : 'btn-secondary'}`} 
-          onClick={() => setMode('manual')}
+          className={`btn ${mode === 'name' ? 'btn-primary' : 'btn-secondary'}`} 
+          onClick={() => setMode('name')}
         >
-          Create Manually
+          By Name (1,000 pts)
         </button>
       </div>
 
-      <form action={async (formData) => {
-        setLoading(true)
-        setError('')
-        
-        formData.append('uid', user.uid)
-        
-        const result = await createCandidateAction(formData)
-        
-        if (result.error) {
-          setError(result.error)
-          setLoading(false)
-        } else if (result.candidateId) {
-          router.push(`/candidate/${result.candidateId}`)
-        }
-      }}>
+      <form onSubmit={handleSubmit}>
         <IngestingModal isOpen={loading} />
         
         {error && (
@@ -80,18 +93,12 @@ export default function CreateCandidateForm() {
                 required
               />
               <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: '0.375rem' }}>
-                For federal candidates only.
+                For federal candidates. Multiple IDs can be separated by commas.
               </p>
             </div>
             <button type="submit" className="btn btn-primary btn-lg" disabled={loading}>
-              Import Candidate
+              Ingest Candidate
             </button>
-            <noscript>
-              <p style={{ marginTop: '1rem', fontSize: '0.8125rem', color: 'var(--warning)' }}>
-                Note: FEC Import requires JavaScript to trigger the ingestion pipeline. 
-                Manual creation works without JavaScript.
-              </p>
-            </noscript>
           </div>
         ) : (
           <div className="card">
@@ -104,17 +111,12 @@ export default function CreateCandidateForm() {
                 placeholder="Full name of the candidate"
                 required
               />
-            </div>
-            <div style={{ marginBottom: '1rem' }}>
-              <label className="label" htmlFor="candidate-level">Level</label>
-              <select id="candidate-level" name="level" className="select">
-                <option value="federal">Federal</option>
-                <option value="state">State (requires 1,000 pts)</option>
-                <option value="local">Local (requires 1,000 pts)</option>
-              </select>
+              <p className="text-muted" style={{ fontSize: '0.75rem', marginTop: '0.375rem' }}>
+                Creating a candidate by name costs 1,000 credibility points.
+              </p>
             </div>
             <button type="submit" className="btn btn-primary btn-lg" disabled={loading}>
-              Create Candidate Page
+              Create Candidate Profile
             </button>
           </div>
         )}

@@ -180,6 +180,7 @@ export const BADGE_DEFINITIONS: Omit<Badge, 'status'>[] = [
 export interface Candidate {
   id: string
   name: string
+  nameNormalized?: string
   photoUrl?: string
   fecIds?: string[]
   status?: 'running' | 'in_office' | 'out_of_office' | 'unknown'
@@ -192,6 +193,8 @@ export interface Candidate {
   }
   industries?: IndustryRecord[]
   badges: Record<string, BadgeStatus>
+  accountabilityPeriods?: AccountabilityPeriod[]
+  locations?: string[]
   createdBy: string
   createdAt: string
   updatedAt: string

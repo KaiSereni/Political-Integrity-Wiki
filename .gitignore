@@ -42,3 +42,4 @@ next-env.d.ts
 
 .emulator_data
 *.log
+prompt.md

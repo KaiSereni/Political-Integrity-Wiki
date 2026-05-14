@@ -96,7 +96,6 @@ export async function submitProposalAction(formData: FormData) {
 
 export async function createCandidateAction(formData: FormData) {
   const name = formData.get('name') as string
-  const level = formData.get('level') as string
   const uid = formData.get('uid') as string
 
   if (!uid) return { error: 'Unauthorized' }
@@ -106,14 +105,22 @@ export async function createCandidateAction(formData: FormData) {
     const userDoc = await adminDb.collection('users').doc(uid).get()
     const userData = userDoc.data()
     
-    if (level !== 'federal' && (userData?.credibilityPoints || 0) < 1000) {
-      return { error: '1,000 points required for state/local candidates' }
+    if ((userData?.credibilityPoints || 0) < 1000) {
+      return { error: '1,000 credibility points required to create a candidate profile by name.' }
     }
+
+    // Deduct points
+    await adminDb.collection('users').doc(uid).update({
+      credibilityPoints: FieldValue.increment(-1000)
+    })
 
     const candidateRef = await adminDb.collection('candidates').add({
       name,
+      nameNormalized: name.toLowerCase().replace(/[^a-z0-9]/g, ''),
       status: 'unknown',
       badges: {},
+      accountabilityPeriods: [],
+      locations: [],
       createdBy: uid,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

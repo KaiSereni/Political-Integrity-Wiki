@@ -14,32 +14,20 @@ export async function getCandidate(id: string): Promise<Candidate | null> {
 }
 
 export async function getAccountabilityPeriods(candidateId: string): Promise<AccountabilityPeriod[]> {
-  const snapshot = await adminDb
-    .collection('candidates')
-    .doc(candidateId)
-    .collection('accountabilityPeriods')
-    .orderBy('yearEnd', 'desc')
-    .get()
-
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  })) as AccountabilityPeriod[]
+  const doc = await adminDb.collection('candidates').doc(candidateId).get()
+  if (!doc.exists) return []
+  const data = doc.data()
+  const periods = (data?.accountabilityPeriods || []) as AccountabilityPeriod[]
+  // Ensure they are sorted by yearEnd desc
+  return periods.sort((a, b) => (b.yearEnd || 0) - (a.yearEnd || 0))
 }
 
 export async function getAccountabilityPeriod(
   candidateId: string,
   periodId: string
 ): Promise<AccountabilityPeriod | null> {
-  const doc = await adminDb
-    .collection('candidates')
-    .doc(candidateId)
-    .collection('accountabilityPeriods')
-    .doc(periodId)
-    .get()
-
-  if (!doc.exists) return null
-  return { id: doc.id, ...doc.data() } as AccountabilityPeriod
+  const periods = await getAccountabilityPeriods(candidateId)
+  return periods.find(p => p.id === periodId) || null
 }
 
 export async function getProposals(

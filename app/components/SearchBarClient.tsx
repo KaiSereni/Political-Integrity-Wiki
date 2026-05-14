@@ -43,7 +43,7 @@ export default function SearchBarClient({ defaultValue = '' }: { defaultValue?: 
     debounceRef.current = setTimeout(async () => {
       setIsSearching(true)
       try {
-        const searchFn = httpsCallable<{ query: string }, { candidates: SearchResult[] }>(functions, 'search_candidates_fn')
+        const searchFn = httpsCallable<{ query: string }, { candidates: SearchResult[] }>(functions, 'search_candidates_fn', {timeout: 600000})
         const result = await searchFn({ query: value })
         setResults(result.data.candidates)
         setShowResults(true)

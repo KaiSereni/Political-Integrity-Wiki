@@ -12,19 +12,22 @@ os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
 
 import time
 import math
+import json
+import hashlib
 from typing import Optional
 import requests
 
 
 class FECClient:
-    """Client for the FEC OpenAPI at api.open.fec.gov."""
+    """Client for the FEC OpenAPI at api.open.fec.gov with Firestore caching."""
 
     BASE_URL = "https://api.open.fec.gov/v1"
     RATE_LIMIT_DELAY = 0.5  # seconds between requests to respect rate limits
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, db = None):
         self.api_key = api_key or os.environ.get("FEC_API_KEY", "DEMO_KEY")
         self._last_request_time = 0.0
+        self.db = db
 
     def _throttle(self):
         """Enforce rate limiting between API requests."""
@@ -33,18 +36,46 @@ class FECClient:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
         self._last_request_time = time.time()
 
+    def _now_iso(self) -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
     def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
-        """Make a GET request to the FEC API."""
-        self._throttle()
+        """Make a GET request to the FEC API, using Firestore cache if available."""
         if params is None:
             params = {}
+        
+        # Build a cache key from endpoint and params
+        # Exclude API key from cache key
+        cache_params = {k: v for k, v in params.items() if k != "api_key"}
+        cache_key = f"{endpoint}?{json.dumps(cache_params, sort_keys=True)}"
+        # Firestore document IDs cannot contain / or ?, so we hash it
+        doc_id = hashlib.sha256(cache_key.encode()).hexdigest()
+
+        if self.db:
+            cache_doc = self.db.collection("fec_cache").document(doc_id).get()
+            if cache_doc.exists:
+                return cache_doc.to_dict()["data"]
+
+        self._throttle()
         params["api_key"] = self.api_key
         params.setdefault("per_page", 100)
 
         url = f"{self.BASE_URL}{endpoint}"
         response = requests.get(url, params=params, timeout=600)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        # Store in cache
+        if self.db:
+            self.db.collection("fec_cache").document(doc_id).set({
+                "endpoint": endpoint,
+                "params": cache_params,
+                "data": data,
+                "cachedAt": self._now_iso()
+            })
+
+        return data
 
     def _get_all_pages(self, endpoint: str, params: Optional[dict] = None, max_pages: int = 10) -> list:
         """Fetch all pages of results from a paginated FEC API endpoint."""
@@ -204,6 +235,8 @@ class CandidateIngester:
         history = self.fec.get_candidate_history(fec_id)
         periods = []
 
+        import uuid
+
         for entry in history:
             cycle = entry.get("two_year_period") or entry.get("election_year")
             if not cycle:
@@ -217,6 +250,7 @@ class CandidateIngester:
             party = entry.get("party_full", entry.get("party", ""))
 
             period = {
+                "id": str(uuid.uuid4()),
                 "yearStart": cycle - 1 if office != "president" else cycle - 3,
                 "yearEnd": cycle,
                 "position": office,
@@ -267,10 +301,8 @@ class CandidateIngester:
 
             periods.append(period)
 
-        return {
-            "candidate": candidate_doc,
-            "periods": periods,
-        }
+        candidate_doc["accountabilityPeriods"] = periods
+        return candidate_doc
 
     def _format_name(self, raw_name: str) -> str:
         """Convert FEC-style 'LAST, FIRST MIDDLE SUFFIX' name to 'First Middle Last Suffix'."""

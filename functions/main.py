@@ -137,6 +137,23 @@ def _check_ban(req: https_fn.CallableRequest):
             )
 
 
+def _merge_periods(existing_periods: list, new_periods: list) -> list:
+    """Merge two lists of accountability periods, avoiding duplicates by position and year."""
+    merged = {f"{p.get('position')}|{p.get('yearEnd')}": p for p in existing_periods}
+    for p in new_periods:
+        key = f"{p.get('position')}|{p.get('yearEnd')}"
+        if key not in merged:
+            merged[key] = p
+        else:
+            # Merge data if existing period has less info (e.g. fecDataFetched is False)
+            if not merged[key].get("fecDataFetched") and p.get("fecDataFetched"):
+                # Preserve existing ID if it has one
+                pid = merged[key].get("id")
+                merged[key].update(p)
+                if pid: merged[key]["id"] = pid
+    return list(merged.values())
+
+
 @https_fn.on_call(timeout_sec=600)
 def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
     """Ingest a federal candidate's data from the FEC API by their FEC ID(s).
@@ -165,16 +182,20 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
                 message=f"A candidate with FEC ID {fec_id} already exists.",
             )
 
-    ingester = CandidateIngester()
+    client = FECClient(db=db)
+    ingester = CandidateIngester(fec_client=client)
+    
     all_periods = []
     base_candidate_data = None
+    all_fec_ids = []
     
-    for i, fec_id in enumerate(fec_ids):
+    for fec_id in fec_ids:
         try:
             result = ingester.ingest_candidate(fec_id)
-            if i == 0:
-                base_candidate_data = result["candidate"]
-            all_periods.extend(result["periods"])
+            if not base_candidate_data:
+                base_candidate_data = result
+            all_periods.extend(result.get("accountabilityPeriods", []))
+            all_fec_ids.extend(result.get("fecIds", []))
         except ValueError as e:
             raise https_fn.HttpsError(
                 code=https_fn.FunctionsErrorCode.NOT_FOUND,
@@ -187,7 +208,6 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
             )
 
     candidate_name = base_candidate_data["name"]
-
     # Check if a candidate with a matching normalized name already exists → merge
     existing_doc = _find_candidate_by_name(candidate_name)
 
@@ -195,65 +215,69 @@ def ingest_fec_candidate(req: https_fn.CallableRequest) -> dict:
         # Merge into existing candidate
         existing_data = existing_doc.to_dict()
         existing_fec_ids = existing_data.get("fecIds", []) or []
-        merged_fec_ids = list(set(existing_fec_ids + fec_ids))
+        merged_fec_ids = list(set(existing_fec_ids + all_fec_ids))
+        
+        existing_periods = existing_data.get("accountabilityPeriods", [])
+        merged_periods = _merge_periods(existing_periods, all_periods)
+
+        # Update candidate locations
+        locations = set(existing_data.get("locations", []))
+        for p in all_periods:
+            if p.get("state"): locations.add(p["state"])
+            if p.get("region"): locations.add(p["region"])
 
         existing_doc.reference.update({
             "fecIds": merged_fec_ids,
+            "accountabilityPeriods": merged_periods,
+            "locations": list(locations),
             "updatedAt": datetime.now(timezone.utc).isoformat(),
         })
-
-        # Add new accountability periods
-        for period in all_periods:
-            period["candidateId"] = existing_doc.id
-            existing_doc.reference.collection("accountabilityPeriods").add(period)
 
         return {
             "candidateId": existing_doc.id,
             "name": existing_data.get("name", candidate_name),
             "merged": True,
-            "message": f"Merged {len(fec_ids)} new FEC ID(s) into existing profile for {existing_data.get('name', candidate_name)}.",
+            "message": f"Merged new FEC data into existing profile for {existing_data.get('name', candidate_name)}.",
         }
     else:
         # Create a new candidate
         candidate_data = base_candidate_data
-        candidate_data["fecIds"] = fec_ids
+        candidate_data["fecIds"] = list(set(all_fec_ids))
         candidate_data["createdBy"] = uid
         candidate_data["nameNormalized"] = _normalize_name(candidate_name)
+        
+        # Build locations
+        locations = set()
+        for p in all_periods:
+            if p.get("state"): locations.add(p["state"])
+            if p.get("region"): locations.add(p["region"])
+        candidate_data["locations"] = list(locations)
+        
         candidate_ref = db.collection("candidates").document()
         candidate_ref.set(candidate_data)
-
-        for period in all_periods:
-            period["candidateId"] = candidate_ref.id
-            db.collection("candidates").document(candidate_ref.id)\
-                .collection("accountabilityPeriods").add(period)
 
         return {"candidateId": candidate_ref.id, "name": candidate_data["name"]}
 
 
 @https_fn.on_call(timeout_sec=600)
 def create_candidate(req: https_fn.CallableRequest) -> dict:
-    """Create a new candidate page, or merge into an existing one if the name matches.
-    State/local requires 1000 credibility points.
-    """
+    """Create a new candidate page by name. Costs 1000 credibility points."""
     uid = _verify_auth(req)
     _check_ban(req)
 
     name = req.data.get("name", "").strip()
-    level = req.data.get("level", "federal")
-
     if not name:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
             message="Candidate name is required.",
         )
 
-    if level in ("state", "local"):
-        points = _get_user_points(uid)
-        if points < 1000:
-            raise https_fn.HttpsError(
-                code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
-                message=f"You need 1000 credibility points to create a {level} candidate. You have {points}.",
-            )
+    points = _get_user_points(uid)
+    if points < 1000:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+            message=f"You need 1000 credibility points to create a candidate by name. You have {points}.",
+        )
 
     # Check if a candidate with the same normalized name already exists → return it
     existing_doc = _find_candidate_by_name(name)
@@ -264,11 +288,18 @@ def create_candidate(req: https_fn.CallableRequest) -> dict:
             "message": f"A candidate named '{existing_doc.to_dict().get('name', name)}' already exists. You can add accountability periods to their profile.",
         }
 
+    # Deduct points
+    db.collection("users").document(uid).update({
+        "credibilityPoints": firestore.Increment(-1000)
+    })
+
     candidate_ref = db.collection("candidates").document()
     candidate_ref.set({
         "name": name,
         "nameNormalized": _normalize_name(name),
         "badges": {},
+        "accountabilityPeriods": [],
+        "locations": [],
         "createdBy": uid,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -277,66 +308,109 @@ def create_candidate(req: https_fn.CallableRequest) -> dict:
     return {"candidateId": candidate_ref.id}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def add_accountability_period(req: https_fn.CallableRequest) -> dict:
-    """Add a new accountability period to a candidate (costs 1000 credibility points)."""
+    """Add a new accountability period to a candidate.
+    Can be added by FEC ID (free) or by Name (costs 1000 credibility points).
+    """
     uid = _verify_auth(req)
     _check_ban(req)
 
     candidate_id = req.data.get("candidateId", "")
-    position = req.data.get("position", "")
-    year_start = req.data.get("yearStart", 0)
-    year_end = req.data.get("yearEnd", 0)
-
-    if not all([candidate_id, position, year_start, year_end]):
+    if not candidate_id:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
-            message="candidateId, position, yearStart, and yearEnd are required.",
+            message="candidateId is required.",
         )
 
-    points = _get_user_points(uid)
-    if points < 1000:
-        raise https_fn.HttpsError(
-            code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
-            message=f"You need 1000 credibility points. You have {points}.",
-        )
+    fec_id = req.data.get("fecId", "").strip()
+    import uuid
+    new_periods = []
+    points_to_deduct = 0
 
-    # Deduct points
-    db.collection("users").document(uid).update({
-        "credibilityPoints": firestore.Increment(-1000)
-    })
+    if fec_id:
+        # Add by FEC ID (free)
+        client = FECClient(db=db)
+        ingester = CandidateIngester(fec_client=client)
+        try:
+            result = ingester.ingest_candidate(fec_id)
+            new_periods = result.get("accountabilityPeriods", [])
+            # Also update candidate FEC IDs if not already present
+            db.collection("candidates").document(candidate_id).update({
+                "fecIds": firestore.ArrayUnion([fec_id])
+            })
+        except Exception as e:
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.INTERNAL,
+                message=f"Failed to fetch FEC data for {fec_id}: {str(e)}",
+            )
+    else:
+        # Add by Name (manual entry) - costs 1000 points
+        position = req.data.get("position", "")
+        year_start = req.data.get("yearStart", 0)
+        year_end = req.data.get("yearEnd", 0)
 
-    period_ref = db.collection("candidates").document(candidate_id)\
-        .collection("accountabilityPeriods").document()
-    period_data = {
-        "candidateId": candidate_id,
-        "yearStart": year_start,
-        "yearEnd": year_end,
-        "position": position,
-        "result": req.data.get("result", "unknown"),
-        "party": req.data.get("party", ""),
-        "region": req.data.get("region", ""),
-        "state": req.data.get("state", ""),
-        "fecDataFetched": False,
-    }
-    period_ref.set(period_data)
-    
-    # Denormalize locations into candidate doc for faster searching
+        if not all([position, year_start, year_end]):
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+                message="position, yearStart, and yearEnd are required for manual entry.",
+            )
+
+        points = _get_user_points(uid)
+        if points < 1000:
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+                message=f"You need 1000 credibility points for manual entry. You have {points}.",
+            )
+        points_to_deduct = 1000
+        
+        new_periods = [{
+            "id": str(uuid.uuid4()),
+            "yearStart": year_start,
+            "yearEnd": year_end,
+            "position": position,
+            "result": req.data.get("result", "unknown"),
+            "party": req.data.get("party", ""),
+            "region": req.data.get("region", ""),
+            "state": req.data.get("state", ""),
+            "fecDataFetched": False,
+        }]
+
+    # Deduct points if necessary
+    if points_to_deduct > 0:
+        db.collection("users").document(uid).update({
+            "credibilityPoints": firestore.Increment(-points_to_deduct)
+        })
+
+    # Update candidate document
     candidate_ref = db.collection("candidates").document(candidate_id)
     candidate_doc = candidate_ref.get()
-    if candidate_doc.exists:
-        data = candidate_doc.to_dict()
-        locations = data.get("locations", [])
-        new_locs = set(locations)
-        if period_data.get("state"): new_locs.add(period_data["state"])
-        if period_data.get("region"): new_locs.add(period_data["region"])
-        
-        candidate_ref.update({"locations": list(new_locs)})
+    if not candidate_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Candidate not found.",
+        )
 
-    return {"periodId": period_ref.id}
+    data = candidate_doc.to_dict()
+    existing_periods = data.get("accountabilityPeriods", [])
+    merged_periods = _merge_periods(existing_periods, new_periods)
+
+    # Update locations
+    locations = set(data.get("locations", []))
+    for p in new_periods:
+        if p.get("state"): locations.add(p["state"])
+        if p.get("region"): locations.add(p["region"])
+
+    candidate_ref.update({
+        "accountabilityPeriods": merged_periods,
+        "locations": list(locations),
+        "updatedAt": datetime.now(timezone.utc).isoformat()
+    })
+
+    return {"success": True, "periodCount": len(new_periods)}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def submit_proposal(req: https_fn.CallableRequest) -> dict:
     """Submit a new value proposal for a field (costs 10 credibility points)."""
     uid = _verify_auth(req)
@@ -388,7 +462,7 @@ def submit_proposal(req: https_fn.CallableRequest) -> dict:
     return {"proposalId": proposal_ref.id}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def vote_proposal(req: https_fn.CallableRequest) -> dict:
     """Toggle vote on a proposal. If the user already voted on this proposal,
     their vote is removed (un-upvote). If voted on a different proposal for the
@@ -469,7 +543,7 @@ def vote_proposal(req: https_fn.CallableRequest) -> dict:
     return {"action": "added", "proposalId": proposal_id}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def admin_pin_proposal(req: https_fn.CallableRequest) -> dict:
     """Admin: Pin a proposal to the top, locking the field."""
     admin_uid = _verify_admin(req)
@@ -528,7 +602,7 @@ def admin_pin_proposal(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def admin_unpin_proposal(req: https_fn.CallableRequest) -> dict:
     """Admin: Unpin a proposal."""
     admin_uid = _verify_admin(req)
@@ -561,7 +635,7 @@ def admin_unpin_proposal(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def admin_ban_user(req: https_fn.CallableRequest) -> dict:
     """Admin: Ban a user temporarily or permanently."""
     admin_uid = _verify_admin(req)
@@ -609,7 +683,7 @@ def admin_ban_user(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def admin_award_points(req: https_fn.CallableRequest) -> dict:
     """Admin: Award or remove credibility points."""
     admin_uid = _verify_admin(req)
@@ -644,7 +718,7 @@ def admin_award_points(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def request_proposal_deletion(req: https_fn.CallableRequest) -> dict:
     """User: Request deletion of their own proposal."""
     uid = _verify_auth(req)
@@ -676,7 +750,7 @@ def request_proposal_deletion(req: https_fn.CallableRequest) -> dict:
     return {"success": True}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def admin_delete_proposal(req: https_fn.CallableRequest) -> dict:
     """Admin: Grant a deletion request (actually delete the proposal)."""
     admin_uid = _verify_admin(req)
@@ -781,7 +855,7 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
                 })
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def search_candidates_fn(req: https_fn.CallableRequest) -> dict:
     """Search candidates in the database by name or location (substring match)."""
     query = req.data.get("query", "").strip().lower()
@@ -816,7 +890,7 @@ def search_candidates_fn(req: https_fn.CallableRequest) -> dict:
     return {"candidates": results}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def get_user_votes(req: https_fn.CallableRequest) -> dict:
     """Get the proposal IDs the current user has voted on for a given candidate/field."""
     uid = _verify_auth(req)
@@ -844,7 +918,7 @@ def get_user_votes(req: https_fn.CallableRequest) -> dict:
     return {"votedProposalIds": voted_ids}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def submit_badge_proposal(req: https_fn.CallableRequest) -> dict:
     """Submit a badge status proposal for a candidate.
     Requires at least one citation (e.g., a video clip of the pledge).
@@ -915,7 +989,7 @@ def submit_badge_proposal(req: https_fn.CallableRequest) -> dict:
     return {"proposalId": proposal_ref.id}
 
 
-@https_fn.on_call()
+@https_fn.on_call(timeout_sec=600)
 def get_badge_proposals(req: https_fn.CallableRequest) -> dict:
     """Get all proposals for a specific badge on a candidate."""
     candidate_id = req.data.get("candidateId", "")

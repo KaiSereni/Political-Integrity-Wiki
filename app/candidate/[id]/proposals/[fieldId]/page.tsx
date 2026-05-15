@@ -5,6 +5,7 @@ import { EDITABLE_FIELDS } from '@/lib/types'
 import type { Metadata } from 'next'
 import ProposalForm from './ProposalForm'
 import VoteButton from './VoteButton'
+import ReportProposalAction from './ReportProposalAction'
 
 export async function generateMetadata(
   props: { params: Promise<{ id: string; fieldId: string }> }
@@ -93,13 +94,23 @@ export default async function ProposalsPage(
                     {i === 0 && !proposal.pinned && (
                       <span style={{ color: 'var(--accent-secondary)', marginLeft: '0.5rem' }}>★ Top</span>
                     )}
+                    <span style={{ marginLeft: 'auto' }}>
+                      <ReportProposalAction proposalId={proposal.id} candidateId={id} />
+                    </span>
                   </div>
                   {proposal.citations.length > 0 && (
                     <div className="citation-list">
                       {proposal.citations.map((c, j) => (
-                        <a key={j} href={c.url} target="_blank" rel="noopener noreferrer" className="citation-link">
-                          🔗 {c.url.length > 60 ? c.url.substring(0, 60) + '...' : c.url}
-                        </a>
+                        <div key={j} style={{ marginBottom: '0.25rem' }}>
+                          <a href={c.url} target="_blank" rel="noopener noreferrer" className="citation-link" style={{ display: 'block' }}>
+                            🔗 {c.url.length > 80 ? c.url.substring(0, 80) + '...' : c.url}
+                          </a>
+                          {c.explanation && (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginLeft: '1.25rem', marginTop: '0.125rem' }}>
+                              {c.explanation}
+                            </div>
+                          )}
+                        </div>
                       ))}
                     </div>
                   )}

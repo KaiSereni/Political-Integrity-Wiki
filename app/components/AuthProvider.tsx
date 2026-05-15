@@ -72,15 +72,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         unsubscribeSnapshot = onSnapshot(userRef, (doc) => {
           if (doc.exists()) {
             const data = doc.data()
-            setUser({
-              uid: firebaseUser.uid,
-              displayName: data.displayName || 'Anonymous',
-              photoURL: data.photoURL || '',
-              email: data.email || '',
-              credibilityPoints: data.credibilityPoints || 0,
-              isAdmin: data.isAdmin || false,
-              isNewUser: isNew && !data.hasCompletedSetup, // We can use a flag
-            })
+            let isBanned = data.isBanned || false
+            
+            if (isBanned && data.banExpiry) {
+              if (new Date() > new Date(data.banExpiry)) {
+                isBanned = false
+              }
+            }
+            
+            if (isBanned) {
+              setUser(null)
+            } else {
+              setUser({
+                uid: firebaseUser.uid,
+                displayName: data.displayName || 'Anonymous',
+                photoURL: data.photoURL || '',
+                email: data.email || '',
+                credibilityPoints: data.credibilityPoints || 0,
+                isAdmin: data.isAdmin || false,
+                isNewUser: isNew && !data.hasCompletedSetup,
+              })
+            }
+          } else {
+            setUser(null)
           }
           setLoading(false)
         })

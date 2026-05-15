@@ -24,11 +24,12 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
   if (!candidate) notFound()
 
   const periods = await getAccountabilityPeriods(id)
-  const selectedPeriod = periods.find(p => p.id === periodId)
+  const visiblePeriods = periods.filter(p => !p.isHidden)
+  const selectedPeriod = visiblePeriods.find(p => p.id === periodId)
   
   // If periodId is invalid, we could redirect or show 404. 
   // Let's show 404 for clarity if they hit a specific URL that doesn't exist.
-  if (!selectedPeriod && periods.length > 0) notFound()
+  if (!selectedPeriod && visiblePeriods.length > 0) notFound()
 
   // Fetch badge proposals and determine effective badge statuses
   // Filter badges by position eligibility
@@ -44,6 +45,12 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
 
   // Check if any badge is "unkept" — if so, all other badges become greyed
   const hasUnkeptBadge = badgeData.some((bd) => bd.topStatus === 'unkept')
+  
+  // Check if candidate has ever held a non-national, non-judicial position for contact info display
+  const hasEligibleContactPosition = visiblePeriods.some(p => 
+    !['president', 'vice_president', 'cabinet'].includes(p.position) &&
+    !['state_supreme_court_justice', 'appellate_court_judge', 'trial_court_judge'].includes(p.position)
+  )
 
   return (
     <div className="container animate-fade-in">
@@ -55,11 +62,12 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               fontSize: '3rem', fontWeight: 900,
-              background: 'linear-gradient(135deg, var(--accent-primary), #7c3aed)',
+              background: candidate.photoUrl ? `url(${candidate.photoUrl}) center/cover no-repeat` : 'linear-gradient(135deg, var(--accent-primary), #7c3aed)',
               color: 'white',
+              overflow: 'hidden',
             }}
           >
-            {candidate.name.charAt(0)}
+            {!candidate.photoUrl && candidate.name.charAt(0)}
           </div>
           <div className="candidate-info">
             <h1 className="candidate-name">{candidate.name}</h1>
@@ -80,10 +88,8 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
               )}
             </div>
 
-            {/* Contact Info — only for non-national, non-judicial positions as per prompt */}
-            {candidate.contactInfo && selectedPeriod && 
-             !['president', 'vice_president', 'cabinet'].includes(selectedPeriod.position) &&
-             !['state_supreme_court_justice', 'appellate_court_judge', 'trial_court_judge'].includes(selectedPeriod.position) && (
+            {/* Contact Info — only if candidate has ever held a non-national, non-judicial position */}
+            {candidate.contactInfo && hasEligibleContactPosition && (
               <details style={{ marginTop: '0.75rem' }}>
                 <summary style={{ cursor: 'pointer', color: 'var(--accent-secondary)', fontSize: '0.875rem' }}>
                   Contact Information
@@ -142,7 +148,7 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
           <AccountabilitySelector
             candidateId={id}
             selectedPeriodId={periodId}
-            periods={periods.map((p) => ({
+            periods={visiblePeriods.map((p) => ({
               id: p.id,
               label: `${p.yearStart}–${p.yearEnd} • ${POSITION_LABELS[p.position] || p.position} ${p.result ? `(${p.result})` : ''}`,
               yearEnd: p.yearEnd,
@@ -160,11 +166,13 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
               aipacMoney: p.aipacMoney,
               donationSizeBreakdown: p.donationSizeBreakdown,
               donationLocationBreakdown: p.donationLocationBreakdown,
+              pacTypeBreakdown: p.pacTypeBreakdown,
               topPacDonors: p.topPacDonors,
+              reportDismissed: p.reportDismissed,
             }))}
           />
 
-          {periods.length === 0 && (
+          {visiblePeriods.length === 0 && (
             <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
               <p className="text-secondary">No accountability periods yet.</p>
               <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
@@ -184,19 +192,49 @@ export default async function CandidatePeriodPage(props: { params: Promise<{ id:
             {EDITABLE_FIELDS
               .filter((f) => !f.id.startsWith('badge_'))
               .filter((f) => selectedPeriod && f.applicablePositions.includes(selectedPeriod.position))
-              .map((field) => (
-                <Link
-                  key={field.id}
-                  href={`/candidate/${id}/proposals/${field.id}?period=${periodId}`}
-                  className="card"
-                  style={{ textDecoration: 'none', color: 'inherit', padding: '1rem' }}
-                >
-                  <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{field.name}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                    {field.description.length > 80 ? `${field.description.substring(0, 80)}...` : field.description}
-                  </div>
-                </Link>
-              ))}
+              .map((field) => {
+                const isFecLocked = field.fecAutoFill && selectedPeriod?.fecDataFetched
+                
+                if (isFecLocked) {
+                  return (
+                    <div 
+                      key={field.id} 
+                      className="card" 
+                      style={{ 
+                        opacity: 0.7, 
+                        padding: '1rem', 
+                        cursor: 'not-allowed',
+                        borderStyle: 'dashed',
+                        borderColor: 'var(--success-muted)'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{field.name}</div>
+                        <span style={{ fontSize: '0.625rem', padding: '0.125rem 0.375rem', borderRadius: '4px', background: 'var(--success-muted)', color: 'var(--success)' }}>
+                          FEC VERIFIED
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        This data is automatically verified via the FEC API.
+                      </div>
+                    </div>
+                  )
+                }
+
+                return (
+                  <Link
+                    key={field.id}
+                    href={`/candidate/${id}/proposals/${field.id}?period=${periodId}`}
+                    className="card"
+                    style={{ textDecoration: 'none', color: 'inherit', padding: '1rem' }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{field.name}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                      {field.description.length > 80 ? `${field.description.substring(0, 80)}...` : field.description}
+                    </div>
+                  </Link>
+                )
+              })}
           </div>
         </section>
       </article>

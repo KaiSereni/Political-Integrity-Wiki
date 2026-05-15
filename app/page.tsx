@@ -1,10 +1,13 @@
 import Link from 'next/link'
 import SearchBar from './components/SearchBar'
+import AdminFeedLink from './components/AdminFeedLink'
 import { getTopEditors, getAllCandidates, getUpcomingElections } from '@/lib/data'
 import { POSITION_LABELS } from '@/lib/types'
 
-export default async function HomePage() {
-  // ... (keeping the existing fetch logic)
+export default async function HomePage(props: { searchParams: Promise<{ level?: string; state?: string }> }) {
+  const { level, state } = await props.searchParams
+  const selectedLevel = level || 'federal'
+
   let topEditors: Awaited<ReturnType<typeof getTopEditors>> = []
   let recentCandidates: Awaited<ReturnType<typeof getAllCandidates>> = []
   let upcomingElections: Awaited<ReturnType<typeof getUpcomingElections>> = []
@@ -18,7 +21,7 @@ export default async function HomePage() {
   } catch { /* DB may not be initialized yet */ }
 
   try {
-    upcomingElections = await getUpcomingElections(10)
+    upcomingElections = await getUpcomingElections(10, selectedLevel, state)
   } catch { /* DB may not be initialized yet */ }
 
   return (
@@ -41,6 +44,7 @@ export default async function HomePage() {
             How It Works
           </Link>
         </div>
+        <AdminFeedLink />
       </section>
 
       <div className="container">
@@ -55,6 +59,30 @@ export default async function HomePage() {
             </svg>
             Upcoming Races
           </h2>
+
+          <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+            <Link 
+              href="/?level=federal" 
+              className={`btn btn-sm ${selectedLevel === 'federal' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ textDecoration: 'none' }}
+            >
+              Federal
+            </Link>
+            <Link 
+              href="/?level=state" 
+              className={`btn btn-sm ${selectedLevel === 'state' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ textDecoration: 'none' }}
+            >
+              State
+            </Link>
+            <Link 
+              href="/?level=local" 
+              className={`btn btn-sm ${selectedLevel === 'local' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ textDecoration: 'none' }}
+            >
+              Local
+            </Link>
+          </div>
           {upcomingElections.length === 0 ? (
             <div className="card" style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
               No upcoming races found. Use the search bar to find candidates for future elections.
@@ -125,22 +153,51 @@ export default async function HomePage() {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '0.75rem' }}>
                 {recentCandidates.map((c) => (
-                  <Link key={c.id} href={`/candidate/${c.id}/${c.latestPeriodId || ''}`} className="card" style={{ textDecoration: 'none', color: 'inherit' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      <div style={{
-                        width: 48, height: 48, borderRadius: 'var(--radius-md)',
-                        background: 'linear-gradient(135deg, var(--accent-primary), #7c3aed)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: '1.25rem', fontWeight: 800, color: 'white', flexShrink: 0,
-                      }}>
-                        {c.name.charAt(0)}
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>{c.name}</div>
-                        <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', textTransform: 'capitalize' }}>
-                          {c.status?.replace('_', ' ') || 'Unknown status'}
+                  <Link key={c.id} href={`/candidate/${c.id}/${c.latestPeriodId || ''}`} className="card candidate-list-card" style={{ textDecoration: 'none', color: 'inherit' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <div style={{
+                          width: 48, height: 48, borderRadius: 'var(--radius-md)',
+                          background: c.photoUrl ? `url(${c.photoUrl}) center/cover no-repeat` : 'linear-gradient(135deg, var(--accent-primary), #7c3aed)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: '1.25rem', fontWeight: 800, color: 'white', flexShrink: 0,
+                          overflow: 'hidden',
+                        }}>
+                          {!c.photoUrl && c.name.charAt(0)}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 700 }}>{c.name}</div>
+                          <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', textTransform: 'capitalize' }}>
+                            {c.status?.replace('_', ' ') || 'Unknown status'}
+                          </div>
                         </div>
                       </div>
+                      
+                      {c.topFields && Object.keys(c.topFields).length > 0 && (
+                        <div style={{ 
+                          marginTop: '0.25rem', 
+                          paddingTop: '0.75rem', 
+                          borderTop: '1px solid var(--border-color)',
+                          fontSize: '0.75rem',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '0.25rem'
+                        }}>
+                          {Object.entries(c.topFields).map(([name, val], idx) => {
+                            if (name === 'Photo') return null; // Don't show URL as text
+                            let displayVal = val;
+                            if (val.startsWith('[') || val.startsWith('{')) displayVal = 'Data provided';
+                            return (
+                              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: 'var(--text-muted)' }}>{name}:</span>
+                                <span style={{ fontWeight: 600, color: 'var(--accent-secondary)' }}>
+                                  {displayVal.length > 20 ? displayVal.substring(0, 20) + '...' : displayVal}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   </Link>
                 ))}

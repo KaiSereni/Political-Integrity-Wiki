@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { POSITION_LABELS, type Position, type PacDonor } from '@/lib/types'
 import AddPeriodAction from './AddPeriodAction'
+import ReportPeriodAction from './ReportPeriodAction'
 
 interface PeriodOption {
   id: string
@@ -20,7 +21,9 @@ interface PeriodOption {
   aipacMoney?: number
   donationSizeBreakdown?: { under200: number; from200to499: number; from500to999: number; from1000to1999: number; from2000plus: number }
   donationLocationBreakdown?: { inState: number; outOfState: number }
+  pacTypeBreakdown?: { corporate: number; political: number; trade: number; lobbyist: number; ideological: number; other: number }
   topPacDonors?: PacDonor[]
+  reportDismissed?: boolean
 }
 
 function formatCurrency(amount: number | undefined): string {
@@ -115,9 +118,51 @@ export default function AccountabilitySelector({
           </div>
           <div className="stat-label">Peak Stock Value</div>
         </div>
+        <div className="card stat-card">
+          <div className="stat-value">{formatCurrency(selected.peakNetAssets)}</div>
+          <div className="stat-label">Peak Net Assets</div>
+        </div>
       </div>
 
       {/* Additional Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
+        <div className="card" style={{ padding: '1rem', borderLeft: '4px solid var(--accent-primary)' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Small Donor Strength</div>
+          <div style={{ fontWeight: 700, marginTop: '0.25rem', fontSize: '1.25rem' }}>
+            {sizeTotal > 0 ? `${((selected.donationSizeBreakdown?.under200 || 0) / sizeTotal * 100).toFixed(1)}%` : 'Unknown'}
+          </div>
+          <div style={{ fontSize: '0.625rem', color: 'var(--text-muted)', marginTop: '0.125rem' }}>Donations under $200</div>
+        </div>
+
+        <div className="card" style={{ padding: '1rem', borderLeft: '4px solid var(--success)' }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Local Support Index</div>
+          <div style={{ fontWeight: 700, marginTop: '0.25rem', fontSize: '1.25rem' }}>
+            {locTotal > 0 ? `${((selected.donationLocationBreakdown?.inState || 0) / locTotal * 100).toFixed(1)}%` : 'Unknown'}
+          </div>
+          <div style={{ fontSize: '0.625rem', color: 'var(--text-muted)', marginTop: '0.125rem' }}>In-state vs. Out-of-state</div>
+        </div>
+
+        <div className="card" style={{ padding: '1rem', borderLeft: `4px solid ${selected.corporatePacMoney === 0 ? 'var(--success)' : 'var(--danger)'}` }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Corporate PAC Index</div>
+          <div style={{ fontWeight: 700, marginTop: '0.25rem', fontSize: '1.25rem', color: selected.corporatePacMoney === 0 ? 'var(--success)' : 'var(--danger)' }}>
+            {selected.totalRaised && selected.totalRaised > 0 
+              ? `${((selected.corporatePacMoney || 0) / selected.totalRaised * 100).toFixed(1)}%` 
+              : '0.0%'}
+          </div>
+          <div style={{ fontSize: '0.625rem', color: 'var(--text-muted)', marginTop: '0.125rem' }}>Share of total raised</div>
+        </div>
+
+        {['president', 'vice_president', 'cabinet', 'senator', 'representative'].includes(selected.position) && (
+          <div className="card" style={{ padding: '1rem', borderLeft: `4px solid ${selected.stockTradingVolume === 0 ? 'var(--success)' : 'var(--warning)'}` }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stock Volume</div>
+            <div style={{ fontWeight: 700, marginTop: '0.25rem', fontSize: '1.25rem', color: selected.stockTradingVolume === 0 ? 'var(--success)' : 'var(--text-primary)' }}>
+              {formatCurrency(selected.stockTradingVolume)}
+            </div>
+            <div style={{ fontSize: '0.625rem', color: 'var(--text-muted)', marginTop: '0.125rem' }}>Traded while in office</div>
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
         {!['state_supreme_court_justice', 'appellate_court_judge', 'trial_court_judge'].includes(selected.position) && (
           <div className="card" style={{ padding: '1rem' }}>
@@ -139,14 +184,6 @@ export default function AccountabilitySelector({
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>AIPAC Money</div>
           <div style={{ fontWeight: 700, marginTop: '0.25rem' }}>{formatCurrency(selected.aipacMoney)}</div>
         </div>
-        {['president', 'vice_president', 'cabinet', 'senator', 'representative'].includes(selected.position) && (
-          <div className="card" style={{ padding: '1rem' }}>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stock Trading Volume</div>
-            <div style={{ fontWeight: 700, marginTop: '0.25rem', color: selected.stockTradingVolume === 0 ? 'var(--success)' : 'var(--text-primary)' }}>
-              {formatCurrency(selected.stockTradingVolume)}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Donation Breakdown Charts */}
@@ -169,6 +206,21 @@ export default function AccountabilitySelector({
             <h4 style={{ marginBottom: '1rem', fontSize: '0.9375rem' }}>Donation Location Breakdown</h4>
             <DonationBar label="In-State" amount={selected.donationLocationBreakdown.inState} total={locTotal} color="#10b981" />
             <DonationBar label="Out-of-State" amount={selected.donationLocationBreakdown.outOfState} total={locTotal} color="#f59e0b" />
+          </div>
+        )}
+
+        {/* PAC Type Breakdown */}
+        {selected.pacTypeBreakdown && (
+          <div className="card" style={{ gridColumn: 'span 2' }}>
+            <h4 style={{ marginBottom: '1rem', fontSize: '0.9375rem' }}>PAC Type Breakdown</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem' }}>
+              <DonationBar label="Corporate" amount={selected.pacTypeBreakdown.corporate} total={selected.totalPacMoney || 1} color="#6366f1" />
+              <DonationBar label="Political/Party" amount={selected.pacTypeBreakdown.political} total={selected.totalPacMoney || 1} color="#10b981" />
+              <DonationBar label="Trade Association" amount={selected.pacTypeBreakdown.trade} total={selected.totalPacMoney || 1} color="#f59e0b" />
+              <DonationBar label="Lobbyist" amount={selected.pacTypeBreakdown.lobbyist} total={selected.totalPacMoney || 1} color="#ef4444" />
+              <DonationBar label="Ideological" amount={selected.pacTypeBreakdown.ideological} total={selected.totalPacMoney || 1} color="#8b5cf6" />
+              <DonationBar label="Other" amount={selected.pacTypeBreakdown.other} total={selected.totalPacMoney || 1} color="#6b7280" />
+            </div>
           </div>
         )}
       </div>
@@ -197,6 +249,12 @@ export default function AccountabilitySelector({
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {!selected.reportDismissed && (
+        <div style={{ textAlign: 'right' }}>
+          <ReportPeriodAction candidateId={candidateId} periodId={selected.id} />
         </div>
       )}
     </div>

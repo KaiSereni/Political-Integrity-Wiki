@@ -237,6 +237,9 @@ export interface AccountabilityPeriod {
 
   /** Whether FEC data has been fetched for this period */
   fecDataFetched?: boolean
+  
+  isHidden?: boolean
+  reportDismissed?: boolean
 }
 
 export interface DonationSizeBreakdown {
@@ -279,6 +282,12 @@ export interface FieldDefinition {
   applicablePositions: Position[]
   /** Whether this field can be auto-filled from FEC data */
   fecAutoFill: boolean
+  /** Data type of the field */
+  type?: 'string' | 'number' | 'list' | 'photo' | 'json'
+  /** Max length for list items or string */
+  maxLength?: number
+  /** Whether citations are optional (e.g. for photo) */
+  citationOptional?: boolean
 }
 
 export interface Proposal {
@@ -300,6 +309,17 @@ export interface Proposal {
 export interface Citation {
   url: string
   explanation?: string
+}
+
+export interface Report {
+  id: string
+  type: 'period' | 'proposal'
+  targetId: string // periodId or proposalId
+  candidateId: string
+  reporterUid: string
+  reason?: string
+  status: 'pending' | 'approved' | 'rejected'
+  createdAt: string
 }
 
 export interface Vote {
@@ -370,10 +390,12 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
   {
     id: 'photo',
     name: 'Photo',
-    description: 'A photo of the candidate',
+    description: 'A photo of the candidate (URL)',
     periodSpecific: false,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'photo',
+    citationOptional: true,
   },
   {
     id: 'contact_info',
@@ -386,6 +408,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
       'mayor', 'city_council_member', 'county_executive', 'sheriff', 'district_attorney',
     ],
     fecAutoFill: false,
+    type: 'json',
   },
   {
     id: 'industries',
@@ -394,6 +417,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: false,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'json',
   },
   {
     id: 'status',
@@ -402,6 +426,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: false,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'string',
   },
   {
     id: 'next_election_date',
@@ -410,6 +435,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: false,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'string',
   },
   // Badges (period-agnostic)
   ...BADGE_DEFINITIONS.map((b) => ({
@@ -419,6 +445,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: false,
     applicablePositions: b.applicablePositions,
     fecAutoFill: false,
+    type: 'string',
   })),
   // Period-specific fields
   {
@@ -430,6 +457,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
       (p) => !NATIONAL_POSITIONS.includes(p as Position)
     ) as Position[],
     fecAutoFill: true,
+    type: 'string',
   },
   {
     id: 'total_raised',
@@ -438,6 +466,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'number',
   },
   {
     id: 'peak_net_assets',
@@ -446,14 +475,16 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'number',
   },
   {
     id: 'peak_stock_value',
     name: 'Peak Stock Value',
-    description: 'The highest total value of stocks held by the candidate during the accountability period (green if $0)',
+    description: 'The highest total value of stocks held by the candidate during the accountability period',
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'number',
   },
   {
     id: 'party',
@@ -462,6 +493,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: PARTISAN_POSITIONS,
     fecAutoFill: true,
+    type: 'string',
   },
   {
     id: 'total_pac_money',
@@ -470,14 +502,16 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'number',
   },
   {
     id: 'corporate_pac_money',
     name: 'Corporate PAC Money',
-    description: 'Total amount received specifically from corporate PACs. The FEC API does not distinguish corporate PACs natively, so this value must be researched and contributed by the community. Green if $0.',
+    description: 'Total amount received specifically from corporate PACs. The FEC API does not distinguish corporate PACs natively, so this value must be researched and contributed by the community.',
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: false,
+    type: 'number',
   },
   {
     id: 'donation_size_breakdown',
@@ -486,6 +520,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'json',
   },
   {
     id: 'donation_location_breakdown',
@@ -494,6 +529,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'json',
   },
   {
     id: 'earmarked_money',
@@ -502,6 +538,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'number',
   },
   {
     id: 'pac_type_breakdown',
@@ -510,6 +547,7 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'json',
   },
   {
     id: 'top_pac_donors',
@@ -518,16 +556,19 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'json',
+    maxLength: 10,
   },
   {
     id: 'stock_trading_volume',
     name: 'Stock Trading Volume',
-    description: 'Total volume of stocks traded while in office (green if $0). Applies to politicians who have held federal or national positions.',
+    description: 'Total volume of stocks traded while in office. Applies to politicians who have held federal or national positions.',
     periodSpecific: true,
     applicablePositions: [
       'president', 'vice_president', 'cabinet', 'senator', 'representative',
     ],
     fecAutoFill: false,
+    type: 'number',
   },
   {
     id: 'aipac_money',
@@ -536,5 +577,6 @@ export const EDITABLE_FIELDS: FieldDefinition[] = [
     periodSpecific: true,
     applicablePositions: Object.keys(POSITION_LABELS) as Position[],
     fecAutoFill: true,
+    type: 'number',
   },
 ]

@@ -62,7 +62,7 @@ export default function SearchBarClient({ defaultValue = '' }: { defaultValue?: 
         name="q"
         type="search"
         className="search-input"
-        placeholder="Search by name, state, or region..."
+        placeholder="Search by name, state, city, or ZIP..."
         value={searchQuery}
         onChange={(e) => handleSearch(e.target.value)}
         onFocus={() => results.length > 0 && setShowResults(true)}

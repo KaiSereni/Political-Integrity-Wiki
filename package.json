@@ -7,13 +7,14 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "emulate": "firebase emulators:start --import=./.emulator_data --export-on-exit",
-    "emulate:new": "firebase emulators:start"
+    "emulate": "firebase emulators:start --import=./.emulator_cache --export-on-exit",
+    "emulate:new": "firebase emulators:start",
+    "own": "chown -R $(whoami) ."
   },
   "dependencies": {
     "firebase": "^12.13.0",
-    "firebase-admin": "^13.9.0",
-    "next": "16.2.6",
+    "firebase-admin": "^13.10.0",
+    "next": "^16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "server-only": "^0.0.1"

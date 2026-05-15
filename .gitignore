@@ -40,6 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-.emulator_data
+.emulator_cache
 *.log
 prompt.md

@@ -538,6 +538,23 @@ h4 { font-size: 1.25rem; }
   border: 2px solid var(--border-color);
   flex-shrink: 0;
   background: var(--bg-secondary);
+  transition: transform var(--transition-normal);
+}
+
+.candidate-photo:hover {
+  transform: scale(1.05);
+}
+
+.candidate-list-card {
+  display: flex;
+  flex-direction: column;
+  transition: all var(--transition-normal);
+}
+
+.candidate-list-card:hover {
+  border-color: var(--accent-primary);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--accent-glow);
+  transform: translateY(-4px);
 }
 
 .candidate-info { flex: 1; }

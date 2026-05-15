@@ -137,6 +137,17 @@ def _check_ban(req: https_fn.CallableRequest):
             )
 
 
+def _is_field_locked(candidate_id: str, field_id: str, period_id: str = "") -> bool:
+    """Check if a field is locked by a pinned proposal."""
+    query = db.collection("proposals")\
+        .where(filter=FieldFilter("candidateId", "==", candidate_id))\
+        .where(filter=FieldFilter("fieldId", "==", field_id))\
+        .where(filter=FieldFilter("periodId", "==", period_id or ""))\
+        .where(filter=FieldFilter("pinned", "==", True))\
+        .limit(1).get()
+    return len(query) > 0
+
+
 def _merge_periods(existing_periods: list, new_periods: list) -> list:
     """Merge two lists of accountability periods, avoiding duplicates by position and year."""
     merged = {f"{p.get('position')}|{p.get('yearEnd')}": p for p in existing_periods}
@@ -412,7 +423,9 @@ def add_accountability_period(req: https_fn.CallableRequest) -> dict:
 
 @https_fn.on_call(timeout_sec=600)
 def submit_proposal(req: https_fn.CallableRequest) -> dict:
-    """Submit a new value proposal for a field (costs 10 credibility points)."""
+    """Submit a new value proposal for a field (costs 10 credibility points).
+    Enforces field schemas: numeric validation, JSON structure, and citation requirements.
+    """
     uid = _verify_auth(req)
     _check_ban(req)
 
@@ -426,6 +439,84 @@ def submit_proposal(req: https_fn.CallableRequest) -> dict:
         raise https_fn.HttpsError(
             code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
             message="candidateId, fieldId, and value are required.",
+        )
+
+    # ─── Schema Enforcement ───────────────────────────────────────────────────
+    # Replicate frontend logic for data integrity
+    
+    # Define numeric fields
+    numeric_fields = [
+        'total_raised', 'peak_net_assets', 'peak_stock_value', 'total_pac_money',
+        'corporate_pac_money', 'earmarked_money', 'aipac_money', 'stock_trading_volume'
+    ]
+    # Define JSON fields
+    json_fields = [
+        'donation_size_breakdown', 'donation_location_breakdown', 
+        'pac_type_breakdown', 'top_pac_donors', 'industries', 'contact_info'
+    ]
+    # Define fields where citations are optional
+    citation_optional_fields = ['photo']
+    # Define fields that are auto-filled by FEC
+    fec_autofill_fields = [
+        'total_raised', 'total_pac_money', 'donation_size_breakdown',
+        'donation_location_breakdown', 'earmarked_money', 'pac_type_breakdown',
+        'top_pac_donors', 'aipac_money', 'party', 'region'
+    ]
+
+    # Check if field is FEC-locked
+    if field_id in fec_autofill_fields and period_id:
+        candidate_doc = db.collection("candidates").document(candidate_id).get()
+        if candidate_doc.exists:
+            periods = candidate_doc.to_dict().get("accountabilityPeriods", [])
+            period = next((p for p in periods if p.get("id") == period_id), None)
+            if period and period.get("fecDataFetched"):
+                raise https_fn.HttpsError(
+                    code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+                    message="This field is automatically verified via the FEC API and cannot be manually edited.",
+                )
+
+    # 1. Numeric Validation
+    if field_id in numeric_fields:
+        try:
+            float(value)
+        except (ValueError, TypeError):
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+                message=f"Field '{field_id}' must be a valid number.",
+            )
+
+    # 2. JSON Validation
+    if field_id in json_fields:
+        try:
+            parsed = json.loads(value)
+            if field_id == 'top_pac_donors':
+                if not isinstance(parsed, list):
+                    raise ValueError("Must be a list")
+                if len(parsed) > 10:
+                    raise https_fn.HttpsError(
+                        code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+                        message="Top PAC Donors list cannot exceed 10 entries.",
+                    )
+        except (json.JSONDecodeError, ValueError):
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+                message=f"Field '{field_id}' must be a valid JSON string.",
+            )
+
+    # 3. Citation Validation
+    if field_id not in citation_optional_fields:
+        if not citations or len(citations) == 0:
+            raise https_fn.HttpsError(
+                code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+                message=f"At least one citation is required for field '{field_id}'.",
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    if _is_field_locked(candidate_id, field_id, period_id):
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="This field is locked because a proposal has been pinned by an admin.",
         )
 
     points = _get_user_points(uid)
@@ -449,10 +540,11 @@ def submit_proposal(req: https_fn.CallableRequest) -> dict:
         "candidateId": candidate_id,
         "periodId": period_id or "",
         "fieldId": field_id,
-        "value": value,
+        "value": str(value), # Store as string for consistency
         "citations": citations,
         "authorUid": uid,
         "authorDisplayName": display_name,
+        "authorIp": req.raw_request.remote_addr,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "upvoteCount": 0,
         "pinned": False,
@@ -808,8 +900,52 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
         field_groups[key].append({"id": p.id, **data})
 
     for key, group in field_groups.items():
-        # Sort by upvoteCount desc, then createdAt asc (account age tiebreaker)
-        group.sort(key=lambda x: (-x.get("upvoteCount", 0), x.get("createdAt", "")))
+        parts = key.split("|")
+        candidate_id = parts[0]
+        period_id = parts[1]
+        
+        # Check if accountability period has ended
+        # (Points only accrue until the end of the period)
+        if period_id:
+            cand_doc = db.collection("candidates").document(candidate_id).get()
+            if cand_doc.exists:
+                periods = cand_doc.to_dict().get("accountabilityPeriods", [])
+                period = next((p for p in periods if p.get("id") == period_id), None)
+                if period:
+                    year_end = period.get("yearEnd", 0)
+                    # For simplicity, we consider the period active through the end of its yearEnd
+                    if year_end and now.year > year_end:
+                        continue
+
+        # Fetch all authors/upvoters for this group to get account age and current points
+        uids = set()
+        for p in group:
+            uids.add(p["authorUid"])
+            votes = db.collection("proposals").document(p["id"]).collection("votes").get()
+            for v in votes:
+                uids.add(v.id)
+        
+        # Batch fetch user data
+        user_data_map = {}
+        if uids:
+            # Firestore supports up to 30 items in 'in' queries
+            uids_list = list(uids)
+            for i in range(0, len(uids_list), 30):
+                batch = uids_list[i:i+30]
+                users = db.collection("users").where(filter=FieldFilter("__name__", "in", batch)).get()
+                for u in users:
+                    ud = u.to_dict()
+                    user_data_map[u.id] = {
+                        "createdAt": ud.get("createdAt", "2099-01-01"),
+                        "points": ud.get("credibilityPoints", 0)
+                    }
+
+        # Sort by upvoteCount desc, then account age (createdAt asc), then points desc
+        group.sort(key=lambda x: (
+            -x.get("upvoteCount", 0),
+            user_data_map.get(x["authorUid"], {}).get("createdAt", "2099-01-01"),
+            -user_data_map.get(x["authorUid"], {}).get("points", 0)
+        ))
 
         top = group[0]
         combined_points = 0
@@ -820,8 +956,7 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
 
         for vote in votes:
             voter_uid = vote.id
-            voter_points = _get_user_points(voter_uid)
-            combined_points += voter_points
+            combined_points += user_data_map.get(voter_uid, {}).get("points", 0)
 
         if combined_points < 500:
             continue
@@ -832,7 +967,7 @@ def daily_credibility_update(event: scheduler_fn.ScheduledEvent) -> None:
         db.collection("users").document(poster_uid).update({
             "credibilityPoints": firestore.Increment(poster_x)
         })
-        # Track points earned per proposal to support "pinning bonus" calculation
+        # Track points earned per proposal
         db.collection("proposals").document(top["id"]).update({
             f"accumulatedPoints.{poster_uid}": firestore.Increment(poster_x)
         })
@@ -874,9 +1009,11 @@ def search_candidates_fn(req: https_fn.CallableRequest) -> dict:
         data = c.to_dict()
         name = data.get("name", "").lower()
         locations = [loc.lower() for loc in data.get("locations", [])]
+        cities = [c.lower() for c in data.get("cities", [])]
+        zips = data.get("zipCodes", [])
         
-        # Match name OR any location (state/region)
-        if query in name or any(query in loc for loc in locations):
+        # Match name OR any location (state/region) OR city OR ZIP
+        if query in name or any(query in loc for loc in locations) or any(query in city for city in cities) or any(query == z for z in zips):
             results.append({
                 "id": c.id,
                 "name": data.get("name", ""),
@@ -953,6 +1090,12 @@ def submit_badge_proposal(req: https_fn.CallableRequest) -> dict:
             message="At least one citation with a URL is required for badge proposals (e.g., a video clip of the pledge).",
         )
 
+    if _is_field_locked(candidate_id, field_id):
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.FAILED_PRECONDITION,
+            message="This field is locked because a proposal has been pinned by an admin.",
+        )
+
     points = _get_user_points(uid)
     if points < 10:
         raise https_fn.HttpsError(
@@ -1023,3 +1166,306 @@ def get_badge_proposals(req: https_fn.CallableRequest) -> dict:
         })
 
     return {"proposals": results}
+
+@https_fn.on_call(timeout_sec=600)
+def report_accountability_period(req: https_fn.CallableRequest) -> dict:
+    """User: Report an accountability period as nonexistent."""
+    uid = _verify_auth(req)
+    _check_ban(req)
+
+    candidate_id = req.data.get("candidateId", "")
+    period_id = req.data.get("periodId", "")
+
+    if not all([candidate_id, period_id]):
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="candidateId and periodId are required.",
+        )
+
+    points = _get_user_points(uid)
+    if points < 200:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+            message=f"You need 200 credibility points to report a period. You have {points}.",
+        )
+
+    db.collection("users").document(uid).update({
+        "credibilityPoints": firestore.Increment(-200)
+    })
+
+    # Hide the period
+    candidate_ref = db.collection("candidates").document(candidate_id)
+    candidate_doc = candidate_ref.get()
+    if not candidate_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Candidate not found.",
+        )
+
+    data = candidate_doc.to_dict()
+    periods = data.get("accountabilityPeriods", [])
+    found = False
+    for p in periods:
+        if p.get("id") == period_id:
+            p["isHidden"] = True
+            found = True
+            break
+            
+    if not found:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Period not found.",
+        )
+
+    candidate_ref.update({"accountabilityPeriods": periods})
+
+    # Create report
+    report_ref = db.collection("reports").document()
+    report_ref.set({
+        "type": "period",
+        "targetId": period_id,
+        "candidateId": candidate_id,
+        "reporterUid": uid,
+        "status": "pending",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"success": True}
+
+@https_fn.on_call(timeout_sec=600)
+def report_proposal(req: https_fn.CallableRequest) -> dict:
+    """User: Report a proposal for inappropriate content."""
+    uid = _verify_auth(req)
+    _check_ban(req)
+
+    proposal_id = req.data.get("proposalId", "")
+    candidate_id = req.data.get("candidateId", "")
+
+    if not all([proposal_id, candidate_id]):
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.INVALID_ARGUMENT,
+            message="proposalId and candidateId are required.",
+        )
+
+    points = _get_user_points(uid)
+    if points < 5:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.PERMISSION_DENIED,
+            message=f"You need 5 credibility points to report a proposal. You have {points}.",
+        )
+
+    db.collection("users").document(uid).update({
+        "credibilityPoints": firestore.Increment(-5)
+    })
+
+    # Create report
+    report_ref = db.collection("reports").document()
+    report_ref.set({
+        "type": "proposal",
+        "targetId": proposal_id,
+        "candidateId": candidate_id,
+        "reporterUid": uid,
+        "status": "pending",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    })
+
+    return {"success": True}
+
+@https_fn.on_call(timeout_sec=600)
+def admin_resolve_period_report(req: https_fn.CallableRequest) -> dict:
+    """Admin: Resolve an accountability period report."""
+    admin_uid = _verify_admin(req)
+    
+    report_id = req.data.get("reportId", "")
+    decision = req.data.get("decision", "") # "approve" or "reject"
+    
+    report_ref = db.collection("reports").document(report_id)
+    report_doc = report_ref.get()
+    if not report_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Report not found.",
+        )
+        
+    report_data = report_doc.to_dict()
+    period_id = report_data.get("targetId")
+    candidate_id = report_data.get("candidateId")
+    reporter_uid = report_data.get("reporterUid")
+    
+    candidate_ref = db.collection("candidates").document(candidate_id)
+    candidate_doc = candidate_ref.get()
+    
+    if candidate_doc.exists:
+        data = candidate_doc.to_dict()
+        periods = data.get("accountabilityPeriods", [])
+        
+        if decision == "approve":
+            # Delete period
+            periods = [p for p in periods if p.get("id") != period_id]
+            candidate_ref.update({"accountabilityPeriods": periods})
+            # Refund & reward reporter: 400 points
+            db.collection("users").document(reporter_uid).update({
+                "credibilityPoints": firestore.Increment(400)
+            })
+        elif decision == "reject":
+            # Put period back up, hide report button
+            for p in periods:
+                if p.get("id") == period_id:
+                    p["isHidden"] = False
+                    p["reportDismissed"] = True
+                    break
+            candidate_ref.update({"accountabilityPeriods": periods})
+            
+    report_ref.update({"status": decision})
+    
+    # Audit log
+    admin_doc = db.collection("users").document(admin_uid).get()
+    admin_name = admin_doc.to_dict().get("displayName", "Admin") if admin_doc.exists else "Admin"
+    db.collection("auditLogs").add({
+        "adminUid": admin_uid,
+        "adminDisplayName": admin_name,
+        "action": f"resolve_period_report_{decision}",
+        "targetId": period_id,
+        "candidateId": candidate_id,
+        "reason": f"Admin {decision} period report",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    
+    return {"success": True}
+
+@https_fn.on_call(timeout_sec=600)
+def admin_resolve_proposal_report(req: https_fn.CallableRequest) -> dict:
+    """Admin: Resolve a proposal report."""
+    admin_uid = _verify_admin(req)
+    
+    report_id = req.data.get("reportId", "")
+    decision = req.data.get("decision", "") # "approve" or "reject"
+    ban_user = req.data.get("banUser", False)
+    ban_duration_days = req.data.get("banDurationDays", 0)
+    permanent_ban = req.data.get("permanentBan", False)
+    
+    report_ref = db.collection("reports").document(report_id)
+    report_doc = report_ref.get()
+    if not report_doc.exists:
+        raise https_fn.HttpsError(
+            code=https_fn.FunctionsErrorCode.NOT_FOUND,
+            message="Report not found.",
+        )
+        
+    report_data = report_doc.to_dict()
+    proposal_id = report_data.get("targetId")
+    reporter_uid = report_data.get("reporterUid")
+    
+    proposal_ref = db.collection("proposals").document(proposal_id)
+    proposal_doc = proposal_ref.get()
+    
+    if decision == "approve":
+        if proposal_doc.exists:
+            prop_data = proposal_doc.to_dict()
+            author_uid = prop_data.get("authorUid")
+            author_ip = prop_data.get("authorIp")
+            proposal_ref.delete()
+            
+            # Ban logic
+            if ban_user:
+                now = datetime.now(timezone.utc)
+                ban_data = {"isBanned": True}
+                if not permanent_ban:
+                    ban_data["banExpiry"] = (now + timedelta(days=ban_duration_days)).isoformat()
+                
+                if author_uid:
+                    db.collection("users").document(author_uid).update(ban_data)
+                
+                if author_ip:
+                    db.collection("bannedIps").document(author_ip).set({
+                        "isBanned": True,
+                        "banExpiry": ban_data.get("banExpiry"),
+                        "bannedAt": now.isoformat(),
+                        "bannedBy": admin_uid
+                    })
+                
+        # Refund reporter 15 points
+        db.collection("users").document(reporter_uid).update({
+            "credibilityPoints": firestore.Increment(15)
+        })
+        
+        
+    report_ref.update({"status": decision})
+    
+    # Audit log
+    admin_doc = db.collection("users").document(admin_uid).get()
+    admin_name = admin_doc.to_dict().get("displayName", "Admin") if admin_doc.exists else "Admin"
+    db.collection("auditLogs").add({
+        "adminUid": admin_uid,
+        "adminDisplayName": admin_name,
+        "action": f"resolve_proposal_report_{decision}",
+        "targetProposalId": proposal_id,
+        "reason": f"Admin {decision} proposal report" + (" and banned author" if ban_user else ""),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    
+    return {"success": True}
+
+@https_fn.on_call(timeout_sec=600)
+def admin_get_reports(req: https_fn.CallableRequest) -> dict:
+    """Admin: Get all pending reports with populated details."""
+    admin_uid = _verify_admin(req)
+
+    reports_snapshot = db.collection("reports")\
+        .where(filter=FieldFilter("status", "==", "pending"))\
+        .order_by("createdAt", direction=firestore.Query.DESCENDING)\
+        .get()
+
+    results = []
+    for r in reports_snapshot:
+        data = r.to_dict()
+        report_id = r.id
+        candidate_id = data.get("candidateId", "")
+        target_id = data.get("targetId", "")
+        r_type = data.get("type", "")
+
+        item = {
+            "id": report_id,
+            "type": r_type,
+            "targetId": target_id,
+            "candidateId": candidate_id,
+            "reporterUid": data.get("reporterUid", ""),
+            "createdAt": data.get("createdAt", ""),
+            "candidateName": "Unknown",
+            "periodName": "Unknown",
+            "proposalValue": None,
+            "upvoteCount": 0,
+        }
+
+        # Fetch candidate to get name and periods
+        cand_doc = db.collection("candidates").document(candidate_id).get()
+        if cand_doc.exists:
+            cand_data = cand_doc.to_dict()
+            item["candidateName"] = cand_data.get("name", "Unknown")
+            
+            if r_type == "period":
+                periods = cand_data.get("accountabilityPeriods", [])
+                for p in periods:
+                    if p.get("id") == target_id:
+                        item["periodName"] = f"{p.get('yearStart')}–{p.get('yearEnd')} • {p.get('position')}"
+                        break
+        
+        if r_type == "proposal":
+            prop_doc = db.collection("proposals").document(target_id).get()
+            if prop_doc.exists:
+                prop_data = prop_doc.to_dict()
+                item["proposalValue"] = prop_data.get("value", "")
+                item["upvoteCount"] = prop_data.get("upvoteCount", 0)
+                period_id = prop_data.get("periodId", "")
+                
+                # Fetch period name
+                if cand_doc.exists and period_id:
+                    periods = cand_doc.to_dict().get("accountabilityPeriods", [])
+                    for p in periods:
+                        if p.get("id") == period_id:
+                            item["periodName"] = f"{p.get('yearStart')}–{p.get('yearEnd')} • {p.get('position')}"
+                            break
+
+        results.append(item)
+
+    return {"reports": results}

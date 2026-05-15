@@ -59,7 +59,7 @@ export default function IngestingModal({ isOpen }: IngestingModalProps) {
         </div>
 
         <p className="modal-footer text-muted">
-          This usually takes between 5-15 seconds. Please don't close this window.
+          This usually takes around 1-3 minutes. Please don't close this window.
         </p>
       </div>
     </div>

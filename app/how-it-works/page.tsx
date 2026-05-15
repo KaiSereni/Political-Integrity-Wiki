@@ -89,9 +89,11 @@ export default function HowItWorksPage() {
         <ul style={{ paddingLeft: '1.25rem', color: 'var(--text-secondary)', lineHeight: 1.8 }}>
           <li>All admin actions are logged in a <strong>public audit log</strong> for full transparency.</li>
           <li>Admins can pin proposals, ban users (temporarily or permanently), and award or remove credibility points.</li>
-          <li>Banned users cannot submit proposals or vote. Bans apply to both account and IP.</li>
+          <li>Banned users cannot submit proposals or vote. Bans apply to both account and IP. Bans automatically expire at the end of their period if temporary, or never if permanent.</li>
           <li>Duplicate proposals can result in temporary bans — always upvote the oldest matching proposal.</li>
           <li>Users cannot delete their own proposals, but can request deletion from an admin.</li>
+          <li><strong>Reporting Accountability Periods:</strong> You can report a period as nonexistent (never happened) for 200 points. The period is temporarily hidden pending admin review. If accurate, the period is deleted and you are awarded 400 points. Otherwise, the period is restored.</li>
+          <li><strong>Reporting Proposals:</strong> You can report a proposal for inappropriate or malicious material for 5 points. If an admin confirms the report, the proposal is deleted, you get 15 points back, and the offending user may be banned.</li>
         </ul>
       </section>
     </div>

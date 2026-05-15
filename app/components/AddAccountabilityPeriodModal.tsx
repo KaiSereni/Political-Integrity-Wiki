@@ -41,6 +41,7 @@ export default function AddAccountabilityPeriodModal({ candidateId, isOpen, onCl
         params.party = formData.get('party')
         params.region = formData.get('region')
         params.state = formData.get('state')
+        params.result = formData.get('result')
       }
 
       await addFn(params)
@@ -112,13 +113,25 @@ export default function AddAccountabilityPeriodModal({ candidateId, isOpen, onCl
                   <input name="yearEnd" type="number" className="input" placeholder="2024" required />
                 </div>
               </div>
-              <div style={{ marginBottom: '1rem' }}>
-                <label className="label">Position</label>
-                <select name="position" className="select" required>
-                  {Object.entries(POSITION_LABELS).map(([val, label]) => (
-                    <option key={val} value={val}>{label}</option>
-                  ))}
-                </select>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <div>
+                  <label className="label">Position</label>
+                  <select name="position" className="select" required>
+                    {Object.entries(POSITION_LABELS).map(([val, label]) => (
+                      <option key={val} value={val}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Result</label>
+                  <select name="result" className="select" required>
+                    <option value="unknown">Unknown</option>
+                    <option value="won">Won</option>
+                    <option value="lost">Lost</option>
+                    <option value="active">Active/Ongoing</option>
+                    <option value="withdrew">Withdrew</option>
+                  </select>
+                </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
                 <div>
